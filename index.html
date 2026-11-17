@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>地鐘即時分析</title>
+<meta name="description" content="手機放在大殿，邊聽邊看地鐘的速度和唱誦的調。聲音只在手機上計算，不上傳。">
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 4c-6 0-9 5-9 11v6l-2 3h22l-2-3v-6c0-6-3-11-9-11z' fill='%238d611b'/%3E%3Ccircle cx='16' cy='27' r='2.5' fill='%238d611b'/%3E%3C/svg%3E">
+<meta name="apple-mobile-web-app-title" content="地鐘分析">
+<meta name="theme-color" content="#eef0ec" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121614" media="(prefers-color-scheme: dark)">
+<style>
+/* 版面：手機直拿的單欄，最上面兩張大字卡（速度、調），下面走勢圖和按鈕；顏色取鐘的青銅、木魚的木色 */
+:root {
+  --bg: #eef0ec;
+  --surface: #fbfbf8;
+  --ink: #1d2321;
+  --muted: #5d6763;
+  --line: #d3d9d2;
+  --bronze: #8d611b;        /* 主色：鐘的青銅 */
+  --bronze-soft: #f0e4cc;
+  --wood: #7a3b22;          /* 敲擊閃燈：木魚 */
+  --key: #23617f;           /* 調的走勢線 */
+  --good: #2c7449;
+  --warn: #a75a12;
+  --bad: #b03535;
+  --font: -apple-system, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+  --num: ui-rounded, -apple-system, "SF Pro Rounded", "Helvetica Neue", system-ui, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121614; --surface: #1b211e; --ink: #e8ece6; --muted: #9ba6a0; --line: #2d3531;
+    --bronze: #d6a54e; --bronze-soft: #3a2f1b; --wood: #e08a5e; --key: #74b8db;
+    --good: #62c38b; --warn: #e6a057; --bad: #ec7272; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121614; --surface: #1b211e; --ink: #e8ece6; --muted: #9ba6a0; --line: #2d3531;
+  --bronze: #d6a54e; --bronze-soft: #3a2f1b; --wood: #e08a5e; --key: #74b8db;
+  --good: #62c38b; --warn: #e6a057; --bad: #ec7272; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.55 var(--font);
+  padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.wrap {
+  max-width: 560px; margin: 0 auto; display: grid; gap: 14px;
+  padding-block: 14px 28px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+header.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+h1 { font-size: 1.15rem; margin: 0; letter-spacing: .04em; }
+h2 { font-size: 1rem; margin: 0 0 6px; }
+.pill {
+  font-size: .8rem; padding: 3px 10px; border-radius: 999px; white-space: nowrap;
+  background: var(--bronze-soft); color: var(--bronze); border: 1px solid transparent;
+}
+.pill.live { background: transparent; border-color: var(--good); color: var(--good); }
+.pill.err { background: transparent; border-color: var(--bad); color: var(--bad); }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; min-width: 0; }
+.label { font-size: .85rem; color: var(--muted); letter-spacing: .06em; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.label b { color: var(--ink); font-weight: 600; letter-spacing: .08em; }
+.bigrow { display: flex; align-items: center; gap: 14px; margin: 2px 0 4px; }
+.big { font: 600 clamp(3.6rem, 19vw, 5.4rem)/1 var(--num); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.big.dim { color: var(--muted); }
+.side { display: grid; gap: 2px; font-size: .95rem; }
+.trend { font-weight: 600; }
+.trend.up { color: var(--warn); }
+.trend.flat { color: var(--muted); }
+.trend.down { color: var(--key); }
+.beat { width: 18px; height: 18px; border-radius: 50%; background: var(--line); flex: none; transition: background .25s ease-out, transform .25s ease-out; }
+.beat.on { background: var(--wood); transform: scale(1.25); transition: none; }
+.small { font-size: .85rem; color: var(--muted); }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 10px; }
+button, .filebtn, select {
+  font: inherit; font-size: .95rem; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; min-height: 40px; cursor: pointer;
+}
+button:focus-visible, .filebtn:focus-within, select:focus-visible { outline: 2px solid var(--bronze); outline-offset: 2px; }
+button.on { border-color: var(--bronze); color: var(--bronze); background: var(--bronze-soft); }
+button[disabled] { opacity: .45; cursor: default; }
+.primary { background: var(--bronze); border-color: var(--bronze); color: var(--surface); font-weight: 600; font-size: 1.05rem; min-height: 52px; }
+.primary.stop { background: var(--surface); color: var(--bad); border-color: var(--bad); }
+.controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.controls .primary { grid-column: 1 / -1; }
+.filebtn { display: flex; align-items: center; justify-content: center; text-align: center; }
+.filebtn input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+audio { width: 100%; }
+/* 調的刻度：以起腔為中心，左右各 3 個半音 */
+.meter { position: relative; height: 34px; margin: 8px 0 2px; }
+.meter .track { position: absolute; left: 0; right: 0; top: 12px; height: 8px; border-radius: 4px;
+  background: linear-gradient(90deg, var(--key) 0%, var(--line) 42%, var(--line) 58%, var(--warn) 100%); opacity: .55; }
+.meter .zero { position: absolute; left: 50%; top: 4px; width: 2px; height: 24px; background: var(--ink); transform: translateX(-1px); }
+.meter .needle { position: absolute; top: 6px; width: 14px; height: 20px; border-radius: 4px; background: var(--ink);
+  border: 2px solid var(--surface); transform: translateX(-7px); left: 50%; transition: left .3s ease-out; }
+.meter .ticks { position: absolute; left: 0; right: 0; top: 24px; display: flex; justify-content: space-between; font-size: .7rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.diff { font-weight: 600; }
+.diff.good { color: var(--good); }
+.diff.up { color: var(--warn); }
+.diff.down { color: var(--key); }
+.diff.bad { color: var(--bad); }
+canvas { display: block; width: 100%; height: 150px; margin-top: 8px; }
+canvas#cKey { height: 120px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: .8rem; color: var(--muted); margin-top: 6px; }
+.sw { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+.notes ul { margin: 0; padding-left: 1.2em; display: grid; gap: 4px; }
+.notes li { font-size: .92rem; }
+footer { font-size: .78rem; color: var(--muted); text-align: center; }
+@media (prefers-reduced-motion: reduce) { .beat, .meter .needle { transition: none; } }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header class="top">
+    <h1>地鐘即時分析</h1>
+    <span id="status" class="pill">範例</span>
+  </header>
+
+  <section class="card" aria-labelledby="lblTempo">
+    <div class="label" id="lblTempo"><b>速度</b>木魚每分鐘幾下</div>
+    <div class="bigrow">
+      <span id="bpm" class="big dim">—</span>
+      <div class="side">
+        <span id="trend" class="trend flat">—</span>
+        <span id="tempoNote" class="small"></span>
+      </div>
+      <span id="beat" class="beat" aria-hidden="true" style="margin-left:auto"></span>
+    </div>
+    <div class="row small">
+      算成一半或兩倍時：
+      <button id="x2" type="button">×2</button>
+      <button id="d2" type="button">÷2</button>
+      <span id="multInfo"></span>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="lblKey">
+    <div class="label" id="lblKey"><b>現在的調</b>四字佛號「阿」唱的音</div>
+    <div class="bigrow">
+      <span id="key" class="big dim">—</span>
+      <div class="side">
+        <span id="keyDiff" class="diff">—</span>
+        <span id="keyDetail" class="small"></span>
+      </div>
+    </div>
+    <div class="meter" aria-hidden="true">
+      <div class="track"></div><div class="zero"></div><div id="needle" class="needle"></div>
+      <div class="ticks"><span>−3</span><span>−2</span><span>−1</span><span>起腔</span><span>+1</span><span>+2</span><span>+3</span></div>
+    </div>
+    <div class="row">
+      <label for="ref" class="small">起腔</label>
+      <select id="ref"></select>
+      <button id="setRef" type="button">用現在的調當起腔</button>
+    </div>
+    <div class="small" style="margin-top:8px">現在唱的字：<span id="note">—</span></div>
+  </section>
+
+  <section class="card" aria-labelledby="lblChart">
+    <div class="label" id="lblChart"><b>整段走勢</b><span id="chartName"></span></div>
+    <canvas id="cTempo" aria-label="速度走勢圖"></canvas>
+    <canvas id="cKey" aria-label="調的走勢圖（跟起腔差幾個半音）"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--bronze)"></i>速度（下／分）</span>
+      <span><i class="sw" style="background:var(--key)"></i>調：跟起腔差幾個半音（往上＝升腔，往下＝掉腔）</span>
+    </div>
+  </section>
+
+  <section class="controls">
+    <button id="start" class="primary" type="button">開始聆聽</button>
+    <label class="filebtn" for="file">用錄音測試<input id="file" type="file" accept="audio/*,video/*"></label>
+    <button id="reset" type="button">清除重來</button>
+  </section>
+  <audio id="player" controls hidden playsinline></audio>
+
+  <section class="card notes">
+    <h2>使用方式</h2>
+    <ul>
+      <li>手機放在聽得到木魚的地方，<b>螢幕保持亮著</b>（關螢幕或切到別的 App 就會停）。</li>
+      <li>聲音只在手機上計算，不錄音、不上傳。</li>
+      <li>剛開始要聽十幾秒才抓得到速度；調要連續唱約 20 秒才會出來。</li>
+      <li>速度看的是最近 6 秒，畫面大約比實際晚 2～3 秒。</li>
+      <li>「用錄音測試」：選一段共修錄音，會邊播邊分析，可以先在家試。</li>
+    </ul>
+  </section>
+  <footer>版本 0.1 雛型 · 算法沿用「地鐘節拍器 3.3」</footer>
+</main>
+
+<script src="engine.js"></script>
+<script src="sample.js"></script>
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var NOTE = DZ.NOTE_NAMES;
+
+  /* ---------- 設定（只存在這支手機） ---------- */
+  function load(k, d) { try { var v = localStorage.getItem("dz." + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }
+  function save(k, v) { try { localStorage.setItem("dz." + k, JSON.stringify(v)); } catch (e) {} }
+  var refPc = load("refPc", 9);            /* 起腔（音名，0＝C，9＝A；可帶小數） */
+  var userMult = 1;
+
+  var sel = $("ref");
+  for (var i = 0; i < 12; i++) {
+    var o = document.createElement("option");
+    o.value = i; o.textContent = NOTE[i];
+    sel.appendChild(o);
+  }
+  function syncRefSel() { sel.value = String(((Math.round(refPc) % 12) + 12) % 12); }
+  syncRefSel();
+  sel.addEventListener("change", function () { refPc = parseInt(sel.value, 10); save("refPc", refPc); render(true); });
+
+  /* ---------- 音訊 ---------- */
+  var ctx = null, eng = null, proc = null, micStream = null, micSrc = null, fileSrc = null;
+  var mode = "sample";                     /* sample／mic／file */
+  var wake = null;
+
+  function ensureCtx() {
+    if (!ctx) {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      ctx = new AC();
+      proc = ctx.createScriptProcessor(4096, 1, 1);
+      proc.onaudioprocess = function (e) {
+        if (eng && mode !== "sample") eng.push(e.inputBuffer.getChannelData(0));
+      };
+      proc.connect(ctx.destination);       /* 輸出是靜音，只是讓它跑 */
+    }
+    if (ctx.state === "suspended") ctx.resume();
+    if (!eng) eng = DZ.createEngine({ sampleRate: ctx.sampleRate });
+    return ctx;
+  }
+  function setStatus(text, cls) { var s = $("status"); s.textContent = text; s.className = "pill" + (cls ? " " + cls : ""); }
+
+  async function keepAwake() {
+    try { if (navigator.wakeLock) wake = await navigator.wakeLock.request("screen"); } catch (e) { wake = null; }
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible" && mode === "mic" && !wake) keepAwake();
+    if (document.visibilityState === "visible" && ctx && ctx.state === "suspended" && mode !== "sample") ctx.resume();
+  });
+
+  async function startMic() {
+    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus("不能用麥克風", "err");
+      $("tempoNote").textContent = "要用 https 開頭的網址打開，才能用麥克風。";
+      return;
+    }
+    stopFile();
+    ensureCtx();
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 }
+      });
+    } catch (e) {
+      setStatus("麥克風沒有允許", "err");
+      $("tempoNote").textContent = "請允許這個網頁使用麥克風（iPhone：網址列左邊「大小」→ 網站設定 → 麥克風），再按一次開始。";
+      return;
+    }
+    if (mode === "sample") clearDisplay();
+    micSrc = ctx.createMediaStreamSource(micStream);
+    micSrc.connect(proc);
+    mode = "mic";
+    setStatus("聆聽中", "live");
+    $("start").textContent = "停止"; $("start").classList.add("stop");
+    keepAwake();
+  }
+  function stopMic() {
+    if (micSrc) { try { micSrc.disconnect(); } catch (e) {} micSrc = null; }
+    if (micStream) { micStream.getTracks().forEach(function (t) { t.stop(); }); micStream = null; }
+    if (wake) { try { wake.release(); } catch (e) {} wake = null; }
+    if (mode === "mic") { mode = "stopped"; setStatus("已停止"); }
+    $("start").textContent = "開始聆聽"; $("start").classList.remove("stop");
+  }
+  $("start").addEventListener("click", function () { if (mode === "mic") stopMic(); else startMic(); });
+
+  var player = $("player");
+  function stopFile() {
+    if (!player.paused) player.pause();
+    if (mode === "file") { mode = "stopped"; setStatus("已停止"); }
+  }
+  $("file").addEventListener("change", function () {
+    var f = this.files && this.files[0];
+    if (!f) return;
+    stopMic();
+    ensureCtx();
+    if (!fileSrc) {
+      fileSrc = ctx.createMediaElementSource(player);
+      fileSrc.connect(proc);
+      fileSrc.connect(ctx.destination);
+    }
+    eng = DZ.createEngine({ sampleRate: ctx.sampleRate });
+    clearDisplay();
+    if (player.src) URL.revokeObjectURL(player.src);
+    player.src = URL.createObjectURL(f);
+    player.hidden = false;
+    mode = "file";
+    $("chartName").textContent = f.name.replace(/\.[^.]+$/, "");
+    setStatus("播放測試", "live");
+    var p = player.play();
+    if (p && p.catch) p.catch(function () { $("tempoNote").textContent = "按下面播放器的播放鍵開始。"; });
+    this.value = "";
+  });
+  player.addEventListener("play", function () { if (ctx && ctx.state === "suspended") ctx.resume(); if (player.src) { mode = "file"; setStatus("播放測試", "live"); } });
+  player.addEventListener("pause", function () { if (mode === "file") setStatus("暫停"); });
+  player.addEventListener("ended", function () { if (mode === "file") { mode = "stopped"; setStatus("播完了"); } });
+
+  $("reset").addEventListener("click", function () {
+    if (ctx) eng = DZ.createEngine({ sampleRate: ctx.sampleRate });
+    userMult = 1;
+    if (mode === "sample") mode = "stopped";
+    clearDisplay();
+  });
+
+  $("x2").addEventListener("click", function () { userMult = Math.min(4, userMult * 2); render(true); });
+  $("d2").addEventListener("click", function () { userMult = Math.max(0.25, userMult / 2); render(true); });
+  $("setRef").addEventListener("click", function () {
+    var st = eng && mode !== "sample" ? eng.state() : null;
+    var k = st && st.key != null ? st.key : (mode === "sample" ? lastOf(DZ_SAMPLE.key) : null);
+    if (k == null) { $("keyDetail").textContent = "還沒聽出調，唱一陣子再按。"; return; }
+    refPc = ((k % 12) + 12) % 12; save("refPc", refPc); syncRefSel(); render(true);
+  });
+
+  /* ---------- 顯示 ---------- */
+  function lastOf(a) { for (var i = a.length - 1; i >= 0; i--) if (a[i] != null) return a[i]; return null; }
+  function wrapDiff(m) { var d = ((m - refPc) % 12 + 12) % 12; return d >= 6 ? d - 12 : d; }
+  function pcName(m) { var r = Math.round(m); return NOTE[((r % 12) + 12) % 12]; }
+  function clearDisplay() {
+    $("bpm").textContent = "—"; $("bpm").classList.add("dim");
+    $("key").textContent = "—"; $("key").classList.add("dim");
+    $("trend").textContent = "—"; $("trend").className = "trend flat";
+    $("tempoNote").textContent = ""; $("keyDiff").textContent = "—"; $("keyDiff").className = "diff";
+    $("keyDetail").textContent = ""; $("note").textContent = "—"; $("multInfo").textContent = "";
+    if (mode !== "file") $("chartName").textContent = "";
+    $("needle").style.left = "50%";
+    drawCharts();
+  }
+
+  function currentSeries() {
+    if (mode === "sample") return { t: DZ_SAMPLE.t, bpm: DZ_SAMPLE.bpm, key: DZ_SAMPLE.key };
+    var h = eng ? eng.history : [];
+    return { t: h.map(function (r) { return r.t; }), bpm: h.map(function (r) { return r.bpm; }), key: h.map(function (r) { return r.key; }) };
+  }
+
+  function render(force) {
+    var bpm, key, note = null, conf = null, autoMult = 1, keyN = 0, live = mode !== "sample";
+    var S = currentSeries();
+    if (!live) {
+      bpm = lastOf(S.bpm); key = lastOf(S.key);
+      $("chartName").textContent = "範例：" + DZ_SAMPLE.name;
+    } else {
+      if (!eng) return;
+      var st = eng.state();
+      bpm = st.bpm; key = st.key; note = st.note; conf = st.tempoConf; autoMult = st.autoMult; keyN = st.keyN;
+      if (mode === "mic" && !$("chartName").textContent) $("chartName").textContent = "現場";
+    }
+    /* 速度 */
+    var b = bpm != null ? bpm * userMult : null;
+    $("bpm").textContent = b != null ? Math.round(b) : "—";
+    $("bpm").classList.toggle("dim", b == null);
+    var trend = $("trend");
+    if (b != null && S.t.length > 12) {
+      var i = S.t.length - 1, ago = null, lim = S.t[i] - (live ? 10 : 30);
+      for (var j = i; j >= 0; j--) if (S.t[j] <= lim) { ago = S.bpm[j]; break; }
+      if (ago) {
+        var r = bpm / ago;
+        if (r > 1.03) { trend.textContent = "↑ 加快中"; trend.className = "trend up"; }
+        else if (r < 0.97) { trend.textContent = "↓ 放慢"; trend.className = "trend down"; }
+        else { trend.textContent = "→ 持平"; trend.className = "trend flat"; }
+      }
+    } else if (live) { trend.textContent = "聽速度中…"; trend.className = "trend flat"; }
+    if (live) $("tempoNote").textContent = b == null ? "還沒聽到穩定的敲擊" : (conf != null && conf < 0.15 ? "節奏不太清楚" : "");
+    var m = autoMult * userMult;
+    $("multInfo").textContent = m !== 1 ? "（已" + (autoMult !== 1 ? "自動" : "") + "修正 ×" + (m >= 1 ? m : "1/" + (1 / m)) + "）" : "";
+
+    /* 調 */
+    $("key").textContent = key != null ? pcName(key) : "—";
+    $("key").classList.toggle("dim", key == null);
+    var kd = $("keyDiff");
+    if (key != null) {
+      var d = wrapDiff(key), ad = Math.abs(d), txt, cls;
+      if (ad < 0.3) { txt = "跟起腔差不多"; cls = "good"; }
+      else if (d > 0) { txt = "比起腔高 " + ad.toFixed(1) + " 個半音"; cls = ad >= 1 ? "bad" : "up"; }
+      else { txt = "比起腔低 " + ad.toFixed(1) + " 個半音"; cls = ad >= 1 ? "bad" : "down"; }
+      kd.textContent = txt; kd.className = "diff " + cls;
+      var nt = DZ.noteOf(key);
+      $("keyDetail").textContent = (d > 0.3 ? "升腔" : d < -0.3 ? "掉腔" : "穩") + " · " + nt.name + (nt.cents >= 0 ? " +" : " ") + nt.cents + " 音分";
+      $("needle").style.left = (50 + Math.max(-3.3, Math.min(3.3, d)) / 3 * 50 * 0.86) + "%";
+    } else {
+      kd.textContent = live ? (keyN > 0 ? "聽調中…" : "還沒聽到唱誦") : "—"; kd.className = "diff";
+      if (live) $("keyDetail").textContent = "";
+    }
+    $("note").textContent = note != null ? (function (n) { var x = DZ.noteOf(n); return x.name + (x.cents >= 0 ? " +" : " ") + x.cents; })(note) : "—";
+    if (force) drawCharts();
+  }
+
+  /* ---------- 走勢圖 ---------- */
+  function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  function prep(cv) {
+    var dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    var g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    g.font = "11px " + css("--font"); return { g: g, w: w, h: h };
+  }
+  function drawSeries(cv, ts, vs, opt) {
+    var P = prep(cv), g = P.g, L = 38, R = 8, T = 8, B = 20, W = P.w - L - R, H = P.h - T - B;
+    var tMax = Math.max(60, ts.length ? ts[ts.length - 1] : 0);
+    var x = function (t) { return L + W * t / tMax; }, y = function (v) { return T + H * (1 - (v - opt.lo) / (opt.hi - opt.lo)); };
+    g.strokeStyle = css("--line"); g.fillStyle = css("--muted"); g.lineWidth = 1; g.textAlign = "right"; g.textBaseline = "middle";
+    opt.grid.forEach(function (v) {
+      g.beginPath(); g.moveTo(L, Math.round(y(v)) + .5); g.lineTo(L + W, Math.round(y(v)) + .5); g.stroke();
+      g.fillText(opt.fmt(v), L - 6, y(v));
+    });
+    if (opt.zero != null) { g.strokeStyle = css("--ink"); g.globalAlpha = .5; g.beginPath(); g.moveTo(L, Math.round(y(opt.zero)) + .5); g.lineTo(L + W, Math.round(y(opt.zero)) + .5); g.stroke(); g.globalAlpha = 1; }
+    /* 時間軸（分鐘） */
+    g.textAlign = "center"; g.textBaseline = "top"; g.fillStyle = css("--muted");
+    var step = tMax > 1800 ? 600 : tMax > 600 ? 300 : tMax > 180 ? 60 : 30;
+    for (var t = 0; t <= tMax + 1; t += step) g.fillText(t >= 60 ? Math.round(t / 60) + " 分" : t + " 秒", Math.min(L + W - 12, Math.max(L + 10, x(t))), T + H + 5);
+    /* 線 */
+    g.strokeStyle = opt.color; g.lineWidth = 2.2; g.lineJoin = "round"; g.beginPath();
+    var pen = false, lastT = -1e9, lx = null, ly = null;
+    for (var i = 0; i < ts.length; i++) {
+      var v = vs[i];
+      if (v == null || ts[i] - lastT > 12) { pen = false; }
+      if (v == null) continue;
+      var px = x(ts[i]), py = y(Math.max(opt.lo, Math.min(opt.hi, v)));
+      if (pen) g.lineTo(px, py); else g.moveTo(px, py);
+      pen = true; lastT = ts[i]; lx = px; ly = py;
+    }
+    g.stroke();
+    if (lx != null) { g.fillStyle = opt.color; g.beginPath(); g.arc(lx, ly, 4, 0, Math.PI * 2); g.fill(); }
+    if (!ts.length || lx == null) { g.fillStyle = css("--muted"); g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(opt.empty, L + W / 2, T + H / 2); }
+  }
+  function drawCharts() {
+    var S = currentSeries(), mult = userMult;
+    var bp = S.bpm.map(function (v) { return v != null ? v * mult : null; });
+    var hi = 400; bp.forEach(function (v) { if (v != null && v > hi - 20) hi = Math.ceil((v + 40) / 100) * 100; });
+    drawSeries($("cTempo"), S.t, bp, { lo: 0, hi: hi, grid: [100, 200, 300].concat(hi > 400 ? [400] : []), fmt: function (v) { return v; },
+      color: css("--bronze"), empty: "開始聆聽後，速度會畫在這裡" });
+    /* 調：跟起腔差幾個半音，接成連續的線（男女眾差八度已在引擎折好） */
+    var kd = [], prev = null;
+    S.key.forEach(function (k) {
+      if (k == null) { kd.push(null); return; }
+      var d = wrapDiff(k);
+      if (prev != null) { while (d - prev > 6) d -= 12; while (prev - d > 6) d += 12; }
+      kd.push(d); prev = d;
+    });
+    var lo = -2, kh = 2;
+    kd.forEach(function (v) { if (v != null) { lo = Math.min(lo, Math.floor(v - 0.5)); kh = Math.max(kh, Math.ceil(v + 0.5)); } });
+    var grid = []; for (var g = lo; g <= kh; g++) if (g !== 0 && (kh - lo <= 6 || g % 2 === 0)) grid.push(g);
+    drawSeries($("cKey"), S.t, kd, { lo: lo, hi: kh, grid: grid, zero: 0, fmt: function (v) { return (v > 0 ? "+" : "") + v; },
+      color: css("--key"), empty: "唱誦約 20 秒後，調會畫在這裡" });
+  }
+
+  /* 敲擊閃燈 */
+  function tick() {
+    if (eng && (mode === "mic" || (mode === "file" && !player.paused))) {
+      var st = eng.state();
+      $("beat").classList.toggle("on", st.lastOnsetAgo != null && st.lastOnsetAgo < 0.08);
+    } else $("beat").classList.remove("on");
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+  setInterval(function () { if (mode !== "sample") render(false); }, 250);
+  setInterval(function () { if (mode !== "sample") drawCharts(); }, 1000);
+  window.addEventListener("resize", function () { drawCharts(); });
+  if (window.matchMedia) {
+    var mq = window.matchMedia("(prefers-color-scheme: dark)");
+    if (mq.addEventListener) mq.addEventListener("change", function () { drawCharts(); });
+  }
+  if (!window.isSecureContext) $("tempoNote").textContent = "這個網址不能用麥克風（要 https），可以先用錄音測試。";
+  render(true);
+})();
+</script>
+</body>
+</html>
