@@ -138,7 +138,8 @@ canvas#cKey { height: 120px; }
 .empty { font-size: .9rem; color: var(--muted); margin: 8px 0 0; }
 .notes ul { margin: 0; padding-left: 1.2em; display: grid; gap: 4px; }
 .notes li { font-size: .92rem; }
-footer { font-size: .78rem; color: var(--muted); text-align: center; }
+footer { font-size: .78rem; color: var(--muted); text-align: center; display: grid; gap: 8px; justify-items: center; }
+.updbtn { font-size: .85rem; min-height: 36px; padding: 6px 14px; }
 @media (prefers-reduced-motion: reduce) { .beat, .meter .needle { transition: none; } }
 </style>
 </head>
@@ -228,7 +229,11 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; }
       <li>從主畫面打開和從 Safari 打開，紀錄是分開存的；固定用同一種方式打開。重要的紀錄請按「匯出」存到「檔案」或傳到 LINE。</li>
     </ul>
   </section>
-  <footer>版本 0.2.1 · 算法沿用「地鐘節拍器 3.3」</footer>
+  <footer>
+    <div>版本 <b id="ver">0.2.2</b> · 算法沿用「地鐘節拍器 3.3」</div>
+    <button id="update" type="button" class="updbtn">更新到最新版</button>
+    <div id="updMsg"></div>
+  </footer>
 </main>
 
 <script src="engine.js"></script>
@@ -672,9 +677,42 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; }
   if (!window.isSecureContext) $("tempoNote").textContent = "這個網址不能用麥克風（要 https），可以先用錄音測試。";
 
   /* 離線：打開過一次之後，沒網路也能打開（只在正式 https 網址啟用，本機預覽不快取） */
+  var hadController = "serviceWorker" in navigator && !!navigator.serviceWorker.controller;
   if ("serviceWorker" in navigator && location.protocol === "https:") {
-    navigator.serviceWorker.register("sw.js").catch(function () {});
+    navigator.serviceWorker.register("sw.js").then(function (reg) { reg.update().catch(function () {}); }).catch(function () {});
+    /* 新版接手時：沒在聽就自動重新整理一次；正在聽就等停止後 */
+    var reloaded = false;
+    navigator.serviceWorker.addEventListener("controllerchange", function () {
+      if (!hadController || reloaded) return;
+      if (busy()) { $("updMsg").textContent = "有新版了，停止後按「更新到最新版」。"; return; }
+      reloaded = true; saveCur(); location.reload();
+    });
   }
+  /* 手動更新：把每個檔案從網路重抓一次存進手機，再重新整理 */
+  $("update").addEventListener("click", async function () {
+    var btn = this, msg = $("updMsg");
+    if (busy()) { msg.textContent = "請先按「停止」再更新。"; return; }
+    btn.disabled = true; msg.textContent = "更新中…";
+    try {
+      var files = ["./", "./index.html", "./engine.js", "./sample.js", "./manifest.webmanifest", "./icon-180.png", "./icon-192.png", "./icon-512.png"];
+      var cache = window.caches ? await caches.open("dizhong") : null;
+      for (var i = 0; i < files.length; i++) {
+        var res = await fetch(files[i] + "?t=" + Date.now(), { cache: "reload" });
+        if (!res.ok) throw new Error("http " + res.status);
+        if (cache) await cache.put(files[i], res);
+      }
+      if (navigator.serviceWorker) {
+        var reg = await navigator.serviceWorker.getRegistration();
+        if (reg) await reg.update().catch(function () {});
+      }
+      saveCur();
+      msg.textContent = "已下載最新版，重新整理中…";
+      setTimeout(function () { location.reload(); }, 300);
+    } catch (e) {
+      btn.disabled = false;
+      msg.textContent = "更新失敗：請確認有網路，再按一次。";
+    }
+  });
   render(true);
   renderRecs();
 })();
