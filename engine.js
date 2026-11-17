@@ -24,7 +24,7 @@
   }
 
   /* ---------- YIN 風格的基頻偵測（人聲用，同 3.3） ---------- */
-  function f0At(x, SR, from, loHz, hiHz) {
+  function f0At(x, SR, from, loHz, hiHz, maxAp) {
     var W = Math.round(SR / loHz) * 2;
     if (from + W * 2 > x.length) return 0;
     var tauMin = Math.floor(SR / hiHz), tauMax = Math.min(Math.floor(SR / loHz), W);
@@ -46,7 +46,7 @@
     if (best < 0) {
       var mn = 1e9;
       for (tau = tauMin + 1; tau < tauMax; tau++) if (cum[tau] < mn) { mn = cum[tau]; best = tau; }
-      if (mn > 0.55) return 0;
+      if (mn > (maxAp != null ? maxAp : 0.55)) return 0;   /* 週期性太弱（雜音）就不算 */
     }
     var a = d[best - 1], b = d[best], c = d[best + 1];
     var shift = (a - c) / (2 * (a - 2 * b + c) || 1e-9);
@@ -165,6 +165,7 @@
       costB: opt.costB != null ? opt.costB : 30,     /* 跳太多（超過 costT 八度）的額外代價 */
       costT: opt.costT != null ? opt.costT : 0.04,
       minConf: opt.minConf != null ? opt.minConf : 0.05, /* 節奏明確度低於這個就不更新（安靜、只有人聲） */
+      minLevel: opt.minLevel != null ? opt.minLevel : -60,   /* 高頻音量低於這個（dBFS）當作沒在敲 */
       keyWin: opt.keyWin || 20             /* 「現在的調」看最近幾秒 */
     };
 
@@ -179,7 +180,7 @@
     var prevMag = new Float32Array(BHI - BLO), curMag = new Float32Array(BHI - BLO);
     var DET = 150;                                  /* 去掉緩慢起伏用的平均長度（約 1.6 秒） */
     var K = Math.ceil(FPS * 30);                    /* 保留 30 秒的起音曲線 */
-    var rawRing = new Float32Array(K), osfRing = new Float32Array(K), nFrames = 0, runSum = 0;
+    var rawRing = new Float32Array(K), osfRing = new Float32Array(K), lvRing = new Float32Array(K), nFrames = 0, runSum = 0;
     var onsetMeanSum = 0, ONW = Math.round(FPS * 1.5);
     var lastOnsetT = -1, onsetCount = 0;
 
@@ -189,7 +190,7 @@
     var TCOST = new Float32Array(M);
     for (i = 0; i < M; i++) { var d = i * LSTEP; TCOST[i] = P.costA * d + P.costB * Math.max(0, d - P.costT); }
     var V = null, NV = new Float32Array(M), nUpd = 0, framesSinceTempo = 0;
-    var tempoIdx = -1, tempoConf = 0, lastGoodTempoT = -1e9, bpmSmooth = 0;
+    var tempoIdx = -1, tempoConf = 0, tempoPeak = 0, tempoLevel = -200, lastGoodTempoT = -1e9, bpmSmooth = 0;
     var mult = 1, lastOut = 0;                      /* 只聽得到每兩拍一次的鐘聲時會算成一半 → 接回連續（同 3.3 healOctaves） */
     var TEMPO_EVERY_F = Math.max(1, Math.round(P.tempoEvery * FPS));
     var seg = new Float32Array(Math.ceil(P.tempoWin * FPS) + 2);
@@ -221,6 +222,10 @@
       }
       var tmp = prevMag; prevMag = curMag; curMag = tmp;
       var f = nFrames;
+      /* 這一格最後 HOP 點的高頻音量（一階差分壓掉冷氣、嗡聲這類低頻） */
+      var lv = 0, i0 = dcount - HOP;
+      for (k = 0; k < HOP; k++) { var dx = dring[(i0 + k) % N] - dring[(i0 + k - 1 + N) % N]; lv += dx * dx; }
+      lvRing[f % K] = Math.sqrt(lv / HOP);
       if (f === 0) acc = 0;                         /* 第一格沒有前一格可比 */
       rawRing[f % K] = acc; runSum += acc;
       if (f >= DET) runSum -= rawRing[(f - DET) % K];
@@ -251,7 +256,17 @@
       for (k = 0; k < len; k++) seg[k] = osfRing[(nFrames - len + k) % K];
       var sc = tempoScores(seg, len, BPMS, FPS);
       var t = nFrames * HOP / TSR;
-      if (!sc || sc.conf < P.minConf) { tempoConf = sc ? sc.conf : 0; return; }
+      /* 敲擊有多「尖」：最近幾秒起音曲線的高點（95 百分位）比平均高幾倍。雜音、只有人聲時很低 */
+      var srt = Array.prototype.slice.call(seg, 0, len).sort(function (a, b) { return a - b; }), mean0 = 0;
+      for (k = 0; k < len; k++) mean0 += seg[k];
+      mean0 /= len;
+      tempoPeak = mean0 > 0 ? srt[Math.floor(len * 0.95)] / mean0 : 0;
+      var lvs = [];
+      for (k = 0; k < len; k++) lvs.push(lvRing[(nFrames - len + k) % K]);
+      lvs.sort(function (a, b) { return a - b; });
+      tempoLevel = 20 * Math.log(lvs[Math.floor(len * 0.95)] + 1e-12) / Math.LN10;
+      /* 太小聲（安靜的房間，只有冷氣、電器聲）或節奏不明確：不更新速度 */
+      if (!sc || sc.conf < P.minConf || tempoLevel < P.minLevel) { tempoConf = sc ? sc.conf : 0; return; }
       tempoConf = sc.conf;
       if (lastGoodTempoT > 0 && t - lastGoodTempoT > 6) {   /* 停了一陣子再開始：重新抓 */
         V = null; nUpd = 0; mult = 1; lastOut = 0; bpmSmooth = 0;
@@ -324,8 +339,9 @@
       if (lastOnsetT >= 0 && t - lastOnsetT < 0.05) return;   /* 避開木魚、鐘敲下去那一瞬間 */
       var st = pcount - PLEN;
       for (k = 0; k < PLEN; k++) ptmp[k] = pring[(st + k) & (PR - 1)];
-      var f = f0At(ptmp, SR, 0, 70, 520);
-      if (f > 70 && f < 520) pts.push({ t: t, m: toMidi(f) });
+      /* 即時版比 3.3 嚴格：週期性要夠明顯，也不收貼著上下限的值（低頻雜音常被量成剛好 70 Hz） */
+      var f = f0At(ptmp, SR, 0, 70, 520, 0.3);
+      if (f > 74 && f < 500) pts.push({ t: t, m: toMidi(f) });
       if (pts.length > 2000 || (pts.length && t - pts[0].t > 60)) {
         var cut = 0;
         while (cut < pts.length && t - pts[cut].t > 60) cut++;
@@ -396,6 +412,8 @@
         t: t,
         bpm: live ? bpmSmooth : null,
         tempoConf: tempoConf,
+        tempoPeak: tempoPeak,
+        tempoLevel: tempoLevel,           /* 最近幾秒高頻音量的高點（dBFS） */
         autoMult: mult,                  /* 1 以外＝自動接回過倍數 */
         lastOnsetAgo: lastOnsetT >= 0 ? t - lastOnsetT : null,
         onsets: onsetCount,

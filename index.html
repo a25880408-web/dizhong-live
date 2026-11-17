@@ -46,6 +46,7 @@
   --good: #62c38b; --warn: #e6a057; --bad: #ec7272; color-scheme: dark;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }   /* 提示條等有 display:flex 的元素，hidden 才藏得起來 */
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.55 var(--font);
@@ -227,7 +228,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; }
       <li>從主畫面打開和從 Safari 打開，紀錄是分開存的；固定用同一種方式打開。重要的紀錄請按「匯出」存到「檔案」或傳到 LINE。</li>
     </ul>
   </section>
-  <footer>版本 0.2 · 算法沿用「地鐘節拍器 3.3」</footer>
+  <footer>版本 0.2.1 · 算法沿用「地鐘節拍器 3.3」</footer>
 </main>
 
 <script src="engine.js"></script>
@@ -315,7 +316,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; }
       return;
     }
     /* 停一下再按開始：接著同一份；剛看完範例、紀錄或錄音測試：開新的一份 */
-    if (!eng || !cur || cur.kind !== "mic" || mode === "sample" || mode === "record") newSession("mic");
+    if (!eng || !cur || cur.kind !== "mic" || mode === "sample" || mode === "record") { newSession("mic"); clearDisplay(); }
     viewRec = null;
     micSrc = ctx.createMediaStreamSource(micStream);
     micSrc.connect(proc);
@@ -586,7 +587,9 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; }
       var nt = DZ.noteOf(key);
       $("keyDetail").textContent = (d > 0.3 ? "升腔" : d < -0.3 ? "掉腔" : "穩") + " · " + nt.name + (nt.cents >= 0 ? " +" : " ") + nt.cents + " 音分";
       $("needle").style.left = (50 + Math.max(-3.3, Math.min(3.3, d)) / 3 * 50 * 0.86) + "%";
+      $("needle").style.visibility = "visible";
     } else {
+      $("needle").style.left = "50%"; $("needle").style.visibility = "hidden";
       kd.textContent = live && eng ? (keyN > 0 ? "聽調中…" : "還沒聽到唱誦") : "—"; kd.className = "diff";
       if (live) $("keyDetail").textContent = "";
     }
