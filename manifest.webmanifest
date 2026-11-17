@@ -1,0 +1,15 @@
+{
+  "name": "地鐘即時分析",
+  "short_name": "地鐘分析",
+  "description": "邊聽邊看地鐘的速度和唱誦的調",
+  "lang": "zh-Hant",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#eef0ec",
+  "theme_color": "#eef0ec",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
