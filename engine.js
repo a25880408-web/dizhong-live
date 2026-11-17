@@ -79,12 +79,14 @@
   }
 
   /* 一段時間窗的速度分數（自相關＋梳狀加權，同 3.3），另外回傳「節奏有多明確」 */
-  function tempoScores(s0, len, bpms, fps) {
+  function tempoScores(s0, len, bpms, fps, rec) {
     var i, mean = 0;
     for (i = 0; i < len; i++) mean += s0[i];
     mean /= len;
     var s = new Float32Array(len);
     for (i = 0; i < len; i++) s[i] = s0[i] - mean;
+    /* 越近的權重越大（rec＝0.8：最舊的 0.2、最新的 1），速度的估計比較貼近「現在」 */
+    if (rec) for (i = 0; i < len; i++) s[i] *= Math.sqrt((1 - rec) + rec * (i + 1) / len);
     var maxLag = Math.min(len - 1, Math.round(2.6 * fps));
     var ac = new Float32Array(maxLag + 1);
     for (var L = 0; L <= maxLag; L++) {
@@ -159,8 +161,13 @@
     var SR = opt.sampleRate || 48000;
     var api = {};
     var P = {
-      tempoWin: opt.tempoWin || 6,         /* 速度用最近幾秒來算 */
-      tempoEvery: opt.tempoEvery || 0.5,   /* 幾秒更新一次速度 */
+      tempoWin: opt.tempoWin || 6,         /* 速度最多用最近幾秒來算（慢的時候用滿） */
+      tempoBeats: opt.tempoBeats != null ? opt.tempoBeats : 12,   /* 速度穩了以後只看最近幾下（快的時候窗口變短、比較跟得上）；0＝固定 tempoWin */
+      tempoWinMin: opt.tempoWinMin || 3,   /* 窗口最短幾秒 */
+      recency: opt.recency != null ? opt.recency : 0.8,   /* 窗口裡越近的敲擊權重越大（0＝一樣重） */
+      smooth: opt.smooth != null ? opt.smooth : 1,        /* 顯示值的平滑（1＝不平滑；0.4 前是 0.5） */
+      tempoEvery: opt.tempoEvery || 0.25,  /* 幾秒更新一次速度（0.4 前是 0.5） */
+      /* 速度變化的代價：3.3 的值是以每 0.5 秒更新一次訂的，更新得更勤就按比例縮小，每秒能變多少不變 */
       costA: opt.costA != null ? opt.costA : 3,      /* 速度變化的代價（每八度） */
       costB: opt.costB != null ? opt.costB : 30,     /* 跳太多（超過 costT 八度）的額外代價 */
       costT: opt.costT != null ? opt.costT : 0.04,
@@ -187,8 +194,8 @@
     /* 速度格點與 Viterbi */
     var M = 240, BPMS = new Float32Array(M), LSTEP = Math.log(480 / 45) / Math.LN2 / (M - 1);
     for (i = 0; i < M; i++) BPMS[i] = 45 * Math.pow(2, i * LSTEP);
-    var TCOST = new Float32Array(M);
-    for (i = 0; i < M; i++) { var d = i * LSTEP; TCOST[i] = P.costA * d + P.costB * Math.max(0, d - P.costT); }
+    var TCOST = new Float32Array(M), CS = P.tempoEvery / 0.5;
+    for (i = 0; i < M; i++) { var d = i * LSTEP; TCOST[i] = CS * (P.costA * d + P.costB * Math.max(0, d - P.costT * CS)); }
     var V = null, NV = new Float32Array(M), nUpd = 0, framesSinceTempo = 0;
     var tempoIdx = -1, tempoConf = 0, tempoPeak = 0, tempoLevel = -200, lastGoodTempoT = -1e9, bpmSmooth = 0;
     var mult = 1, lastOut = 0;                      /* 只聽得到每兩拍一次的鐘聲時會算成一半 → 接回連續（同 3.3 healOctaves） */
@@ -252,9 +259,14 @@
     }
 
     function updateTempo() {
-      var len = Math.min(nFrames, Math.round(P.tempoWin * FPS), K), k;
+      var upSec = nUpd * P.tempoEvery;              /* 這一輪已經穩定算了幾秒 */
+      /* 窗口：剛開始、慢的時候用滿 6 秒（拍子少，短了會算成兩倍）；穩了以後只看最近 12 下，
+       * 例如 240 下／分只看 3 秒，畫面比較跟得上加速。越近的敲擊權重也越大。 */
+      var win = P.tempoWin, settled = upSec > 10 && lastOut > 0;
+      if (settled && P.tempoBeats) win = Math.max(P.tempoWinMin, Math.min(P.tempoWin, P.tempoBeats * 60 / (lastOut / mult)));
+      var len = Math.min(nFrames, Math.round(win * FPS), K), k;
       for (k = 0; k < len; k++) seg[k] = osfRing[(nFrames - len + k) % K];
-      var sc = tempoScores(seg, len, BPMS, FPS);
+      var sc = tempoScores(seg, len, BPMS, FPS, settled ? P.recency : 0);
       var t = nFrames * HOP / TSR;
       /* 敲擊有多「尖」：最近幾秒起音曲線的高點（95 百分位）比平均高幾倍。雜音、只有人聲時很低 */
       var srt = Array.prototype.slice.call(seg, 0, len).sort(function (a, b) { return a - b; }), mean0 = 0;
@@ -277,7 +289,7 @@
         for (j = 0; j < M; j++) V[j] = obs[j];
       } else {
         /* 剛開始幾次放寬連續性，讓它先找到對的八度 */
-        var w = Math.min(1, 0.15 + nUpd / 12);
+        var w = Math.min(1, 0.15 + upSec / 6);
         var mx = -1e9;
         for (j = 0; j < M; j++) {
           var best = -1e9;
@@ -310,7 +322,7 @@
         if (den < 0) b = 45 * Math.pow(2, (bi + Math.max(-0.5, Math.min(0.5, 0.5 * (a0 - c0) / den))) * LSTEP);
       }
       /* 地鐘只會越敲越快，突然變一半或兩倍不是真的。剛開始 10 秒還在找速度，不接 */
-      if (lastOut && nUpd > 20) {
+      if (lastOut && upSec > 10) {
         var dd = Math.log(b * mult / lastOut) / Math.LN2;
         if (Math.abs(dd) > 0.6) {
           var nm = mult * Math.pow(2, -Math.round(dd));
@@ -319,7 +331,7 @@
       }
       b *= mult;
       lastOut = b;
-      bpmSmooth = bpmSmooth ? bpmSmooth + (b - bpmSmooth) * 0.5 : b;
+      bpmSmooth = bpmSmooth ? bpmSmooth + (b - bpmSmooth) * P.smooth : b;
     }
 
     function onEnvTick() {
@@ -407,7 +419,7 @@
     function state() {
       var t = now();
       if (t - cachedAt >= 0.2 || !cachedPitch) { cachedPitch = pitchStats(t); cachedAt = t; }
-      var live = tempoIdx >= 0 && nUpd >= 20 && t - lastGoodTempoT < 4;   /* 剛開始 10 秒的估計還在跳，不顯示 */
+      var live = tempoIdx >= 0 && nUpd * P.tempoEvery >= 10 && t - lastGoodTempoT < 4;   /* 剛開始 10 秒的估計還在跳，不顯示 */
       return {
         t: t,
         bpm: live ? bpmSmooth : null,

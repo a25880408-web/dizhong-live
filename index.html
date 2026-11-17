@@ -224,13 +224,13 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
       <li>手機放在聽得到木魚的地方，<b>螢幕保持亮著</b>（關螢幕或切到別的 App 就會停）。</li>
       <li>聲音只在手機上計算，不錄音、不上傳；紀錄只存數字（速度、調），也只存在這支手機。</li>
       <li>剛開始要聽十幾秒才抓得到速度；調要連續唱約 20 秒才會出來。</li>
-      <li>速度看的是最近 6 秒，畫面大約比實際晚 2～3 秒。</li>
+      <li>速度看的是最近十幾下（慢的時候 6 秒、快的時候約 3 秒），加速時畫面大約比實際晚 2 秒。</li>
       <li><b>沒網路也能用</b>：打開過一次，之後沒網路也打得開。建議用 Safari 的分享鍵「加入主畫面」，從主畫面的圖示打開。</li>
       <li>從主畫面打開和從 Safari 打開，紀錄是分開存的；固定用同一種方式打開。重要的紀錄請按「匯出」存到「檔案」或傳到 LINE。</li>
     </ul>
   </section>
   <footer>
-    <div>版本 <b id="ver">0.2.2</b> · 算法沿用「地鐘節拍器 3.3」</div>
+    <div>版本 <b id="ver">0.3</b> · 算法沿用「地鐘節拍器 3.3」</div>
     <button id="update" type="button" class="updbtn">更新到最新版</button>
     <div id="updMsg"></div>
   </footer>
@@ -275,7 +275,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     if (!ctx) {
       var AC = window.AudioContext || window.webkitAudioContext;
       ctx = new AC();
-      proc = ctx.createScriptProcessor(4096, 1, 1);
+      proc = ctx.createScriptProcessor(2048, 1, 1);   /* 每段約 0.04 秒（0.3 前是 4096，約 0.09 秒） */
       proc.onaudioprocess = function (e) {
         if (eng && (mode === "mic" || mode === "file")) eng.push(e.inputBuffer.getChannelData(0));
       };
@@ -658,12 +658,17 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
       color: css("--key"), alpha: notLive ? 0.75 : 1, empty: "唱誦約 20 秒後，調會畫在這裡" });
   }
 
-  /* 敲擊閃燈 */
+  /* 敲擊閃燈：每聽出一下就亮 0.1 秒。
+   * 0.3 前是看「離上一下多久」，但聲音一段一段進來、聽出來時多半已經超過門檻，四下只亮一下。 */
+  var beatEng = null, beatN = 0, beatUntil = 0;
   function tick() {
+    var nowMs = performance.now();
     if (eng && busy()) {
       var st = eng.state();
-      $("beat").classList.toggle("on", st.lastOnsetAgo != null && st.lastOnsetAgo < 0.08);
-    } else $("beat").classList.remove("on");
+      if (eng !== beatEng) { beatEng = eng; beatN = st.onsets; }
+      else if (st.onsets !== beatN) { beatN = st.onsets; beatUntil = nowMs + 100; }
+    } else beatUntil = 0;
+    $("beat").classList.toggle("on", nowMs < beatUntil);
     requestAnimationFrame(tick);
   }
   requestAnimationFrame(tick);
