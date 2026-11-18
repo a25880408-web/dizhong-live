@@ -210,6 +210,10 @@
       stopMin: opt.stopMin != null ? opt.stopMin : 4,
       resumeFrac: opt.resumeFrac != null ? opt.resumeFrac : 0.85,   /* 停了以後：最近 6 秒清楚的比例要這麼高 */
       resumeSec: opt.resumeSec != null ? opt.resumeSec : 3,         /* 而且持續幾秒，才恢復顯示（講話、雜音不會） */
+      /* 0.5.1：追蹤剛開始（或從頭抓）的前幾秒放寬連續性，追到的幾乎就是當下的最高點，跟單獨看的「對得上」不代表節奏清楚，不算數 */
+      trustSec: opt.trustSec != null ? opt.trustSec : 6,
+      /* 0.5.1：還沒顯示（剛開始聽、停了以後）時，連續幾秒都不清楚就從頭抓，免得雜音裡追到的速度、倍數帶進木魚聲（實測會先顯示兩倍 6 秒） */
+      resetSec: opt.resetSec != null ? opt.resetSec : 2,
       keyWin: opt.keyWin || 20             /* 「現在的調」看最近幾秒 */
     };
 
@@ -237,7 +241,12 @@
     var tempoIdx = -1, tempoConf = 0, tempoPeak = 0, tempoLevel = -200, lastGoodTempoT = -1e9, bpmSmooth = 0;
     var mult = 1, lastOut = 0;                      /* 只聽得到每兩拍一次的鐘聲時會算成一半 → 接回連續（同 3.3 healOctaves） */
     var obsBest = -1, jumpSince = -1, jumpRef = 0, dispT = -1e9, dispMult = 1;  /* 這一次單獨看的最高點、突然跳的起點和跳到的值 */
-    var beatOn = true, lastBeatT = -1e9, stopBpm = null, resumeSince = -1, onSince = -1;
+    /* beatOn：可以顯示速度；everOn：這一輪聽過清楚的木魚（之後沒了才算「停了」）。
+     * 0.5.1 起一開始也是 beatOn＝false，要跟「停了以後恢復」一樣聽到夠清楚的敲擊才顯示；
+     * 原本一開始照單全收、顯示 20 秒後才判斷停了，地鐘還沒開始時講話、雜音、儀式聲都會先跑出數字 */
+    var beatOn = false, everOn = false, lastBeatT = -1e9, stopBpm = null, resumeSince = -1, onSince = -1;
+    var unclear = 0, everReset = false;            /* 還沒顯示時連續幾次不清楚；這一輪有沒有因為不清楚從頭抓過（畫面倒數用） */
+    var tN = 0, tG = 0;                            /* 這次追蹤滿 trustSec 秒以後算了幾次、清楚幾次 */
     var GH = Math.round(6 / P.tempoEvery), gHist = new Uint8Array(GH), gN = 0;
     var TEMPO_EVERY_F = Math.max(1, Math.round(P.tempoEvery * FPS));
     var seg = new Float32Array(Math.ceil(P.tempoWin * FPS) + 2);
@@ -323,7 +332,7 @@
       if (!sc || sc.conf < P.minConf || tempoLevel < P.minLevel) { tempoConf = sc ? sc.conf : 0; judgeBeat(t, false, nUpd * P.tempoEvery); return; }
       tempoConf = sc.conf;
       if (lastGoodTempoT > 0 && t - lastGoodTempoT > 6) {   /* 停了一陣子再開始：重新抓 */
-        V = null; nUpd = 0; mult = 1; lastOut = 0; bpmSmooth = 0;
+        V = null; nUpd = 0; mult = 1; lastOut = 0; bpmSmooth = 0; tN = tG = 0;
       }
       var obs = sc.s, j, p;
       if (!V) {
@@ -385,15 +394,22 @@
       if (jump) {
         if (jumpSince < 0 || Math.abs(Math.log(b / jumpRef) / Math.LN2) > P.jumpOct / 2 + P.rampOct * (t - jumpSince)) { jumpSince = t; jumpRef = b; }
       } else jumpSince = -1;
-      judgeBeat(t, agree, upSec);
+      if (upSec >= P.trustSec) { tN++; if (agree) tG++; }   /* 追蹤滿 trustSec 秒以後，清楚的占幾成（畫面倒數用） */
+      judgeBeat(t, agree && upSec >= P.trustSec, upSec);
       if (agree && beatOn && bi < M - 3 && (!jump || t - jumpSince >= P.jumpHold)) {
         bpmSmooth = bpmSmooth ? bpmSmooth + (b - bpmSmooth) * P.smooth : b;
         dispT = t; dispMult = mult;
       }
     }
 
+    function clarity() {
+      var s = 0, n = Math.min(gN, GH);
+      for (var q = 0; q < n; q++) s += gHist[q];
+      return n ? s / n : 0;
+    }
+
     /* 有沒有在敲：顯示中超過 stopBeats 下（至少 stopMin 秒）沒有清楚的一次 → 停了（畫面停在最後的速度）；
-     * 停了以後要最近 6 秒九成左右都清楚、持續 resumeSec 秒才恢復，講話、雜音不會讓數字又跑出來 */
+     * 剛開始聽、停了以後，都要最近 6 秒九成左右都清楚、持續 resumeSec 秒才顯示，講話、雜音不會讓數字跑出來 */
     function judgeBeat(t, good, upSec) {
       gHist[gN % GH] = good ? 1 : 0; gN++;
       if (good) lastBeatT = t;
@@ -403,17 +419,25 @@
         if (onSince >= 0 && t - onSince >= P.stopAfter && lastBeatT > -1e8 && t - lastBeatT > Math.max(P.stopMin, P.stopBeats * per)) {
           beatOn = false; resumeSince = -1; onSince = -1;
           stopBpm = bpmSmooth > 0 ? bpmSmooth : null;
-          V = null; nUpd = 0; mult = 1; lastOut = 0; bpmSmooth = 0; jumpSince = -1; dispMult = 1;   /* 重新開始時從頭抓 */
+          V = null; nUpd = 0; mult = 1; lastOut = 0; bpmSmooth = 0; jumpSince = -1; dispMult = 1; tN = tG = 0;   /* 重新開始時從頭抓 */
         }
       } else {
         var s = 0;
         for (var q = 0; q < GH; q++) s += gHist[q];
         if (gN >= GH && s / GH >= P.resumeFrac) {
           if (resumeSince < 0) resumeSince = t;
-          if (t - resumeSince >= P.resumeSec) {           /* 恢復：停了那段雜音裡接的倍數不算 */
-            beatOn = true; resumeSince = -1; onSince = t; mult = 1; lastOut = tempoIdx >= 0 ? BPMS[tempoIdx] : 0;
+          if (t - resumeSince >= P.resumeSec) {           /* 開始／恢復：停了那段雜音裡接的倍數不算 */
+            beatOn = true; everOn = true; resumeSince = -1; onSince = t; mult = 1; lastOut = tempoIdx >= 0 ? BPMS[tempoIdx] : 0;
+            unclear = 0;
+            return;
           }
         } else resumeSince = -1;
+        /* 還沒顯示：連續 resetSec 秒都不清楚 → 追蹤從頭抓 */
+        if (good) unclear = 0;
+        else if (upSec >= P.trustSec) unclear++;
+        if (unclear * P.tempoEvery >= P.resetSec) {
+          V = null; nUpd = 0; mult = 1; lastOut = 0; unclear = 0; everReset = true; tN = tG = 0;
+        }
       }
     }
 
@@ -482,9 +506,12 @@
           });
           if (alt != null) pc = alt;
         }
-        /* 音名 → 音高：離上一次最近的八度；第一次放在標準「阿」A3（57）附近 */
-        var ref = lastKey != null ? lastKey : 57;
+        /* 音名 → 音高：離上一次（1 分鐘內）最近的八度；第一次、隔太久放在標準「阿」A3（57）附近。
+         * 0.5.1 起限制在 C3～A4（48～69）：不是唱誦的聲音（拜佛、開示）讓音名一直繞圈時，原本會一路往下飄（實測 9-11 共修錄音飄到 −300） */
+        var ref = lastKey != null && t - lastKeyT <= 60 ? lastKey : 57;
         key = pc + 12 * Math.round((ref - pc) / 12);
+        while (key < 48) key += 12;
+        while (key > 69) key -= 12;
         lastKey = key; lastKeyT = t;
       }
       return { note: note, key: key, keyN: keyPts.length, center: c };
@@ -521,18 +548,21 @@
       var t = now();
       if (t - cachedAt >= 0.2 || !cachedPitch) { cachedPitch = pitchStats(t); cachedAt = t; }
       var live = beatOn && bpmSmooth > 0 && tempoIdx >= 0 && nUpd * P.tempoEvery >= 10 && t - lastGoodTempoT < 4;   /* 剛開始 10 秒的估計還在跳，不顯示 */
-      /* 開頭取樣：先收 4 秒聲音才算第一次，再算滿 10 秒（節奏夠清楚的那幾次才算）才顯示。給畫面倒數用 */
-      var warm = null;
-      if (beatOn && (nUpd * P.tempoEvery < 10 || bpmSmooth <= 0)) {
-        var left = Math.max(0, 4 - nFrames / FPS) + Math.max(0, 10 - nUpd * P.tempoEvery);
-        warm = { left: left, frac: Math.max(0, Math.min(1, 1 - left / 14)),
-                 stalled: nFrames >= FPS * 4 && t - lastGoodTempoT > 1.5 };   /* 沒聽到清楚的木魚聲：倒數停住 */
+      /* 開頭取樣：先收 4 秒聲音才算第一次；追蹤 trustSec 秒以後，最近 6 秒 85% 清楚、持續 3 秒才顯示，順利的話追蹤約 14.5 秒。給畫面倒數用 */
+      var warm = null, upSec = nUpd * P.tempoEvery, WARM = 14.5;
+      if (!everOn || (beatOn && (upSec < 10 || bpmSmooth <= 0))) {
+        var left = Math.max(0, 4 - nFrames / FPS) + Math.max(0, WARM - upSec);
+        /* 沒聽到清楚的木魚聲：倒數停住、顯示等木魚聲。因為不清楚從頭抓過以後，要追蹤滿 trustSec 秒、確定清楚才再倒數 */
+        var trusted = upSec >= P.trustSec;
+        var stalled = nFrames >= FPS * 4 && !beatOn && (t - lastGoodTempoT > 1.5 || (everReset && !trusted) ||
+                      (trusted && (t - lastBeatT > 1 || (tN && tG / tN < P.resumeFrac))) || upSec >= WARM);
+        warm = { left: left, frac: stalled && (everReset || trusted) ? 0 : Math.max(0, Math.min(1, 1 - left / (WARM + 4))), stalled: stalled };
       }
       return {
         t: t,
         bpm: live ? bpmSmooth : null,
-        stopped: !beatOn,                 /* 判斷成停了（地鐘結束、只剩講話或雜音） */
-        lastBpm: beatOn ? null : stopBpm, /* 停之前最後的速度 */
+        stopped: everOn && !beatOn,       /* 判斷成停了（地鐘結束、只剩講話或雜音）；還沒聽到過清楚的木魚不算 */
+        lastBpm: everOn && !beatOn ? stopBpm : null, /* 停之前最後的速度 */
         tempoConf: tempoConf,
         tempoPeak: tempoPeak,
         tempoLevel: tempoLevel,           /* 最近幾秒高頻音量的高點（dBFS） */
@@ -543,7 +573,8 @@
         key: cachedPitch.key,            /* 現在的調：四字佛號「阿」的音 */
         keyN: cachedPitch.keyN,
         keyFrac: cachedPitch.key != null ? 1 : Math.min(1, cachedPitch.keyN / 30),   /* 調的取樣進度（唱得穩的點要 30 個） */
-        warm: warm                        /* 速度還在取樣：{ left 剩幾秒, frac 進度, stalled 等木魚聲 }，其他時候 null */
+        warm: warm,                       /* 速度還在取樣：{ left 剩幾秒, frac 進度, stalled 等木魚聲 }，其他時候 null */
+        clarity: clarity()                /* 最近 6 秒「清楚的一次」占幾成（測試用） */
       };
     }
 
@@ -556,7 +587,8 @@
     api.state = state;
     api.history = history;
     api.reset = reset;
-    api.rearm = function () { if (!beatOn) { beatOn = true; lastBeatT = -1e9; resumeSince = -1; onSince = -1; } };   /* 使用者重新按開始：照第一次那樣抓 */
+    /* 使用者停止後重新按開始：已經判斷成停了的話，回到剛開始聽的樣子（顯示取樣中，聽到清楚的木魚才出數字） */
+    api.rearm = function () { if (!beatOn) { everOn = false; stopBpm = null; lastBeatT = -1e9; resumeSince = -1; onSince = -1; unclear = 0; everReset = false; } };
     api.sampleRate = SR;
     return api;
   }

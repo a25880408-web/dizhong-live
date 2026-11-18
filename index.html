@@ -241,6 +241,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
       <li>手機放在聽得到木魚的地方，<b>螢幕保持亮著</b>（關螢幕或切到別的 App 就會停）。</li>
       <li>聲音只在手機上計算，不錄音、不上傳；紀錄只存數字（速度、調），也只存在這支手機。</li>
       <li>剛開始會顯示「<b>聲音取樣中</b>」和倒數：速度約 14 秒（木魚聲不清楚時倒數會停住、顯示「等木魚聲」）；調通常唱幾秒就出來，取樣中會顯示百分比。</li>
+      <li>要聽到<b>清楚、規律的木魚聲</b>才會出數字；地鐘還沒開始時，講話、雜音不會出數字。其他有固定節奏的聲音（誦經的木魚、音樂、機器聲）還是會算出速度。</li>
       <li>速度看的是最近十幾下（慢的時候 6 秒、快的時候約 3 秒），加速時畫面大約比實際晚 2 秒。</li>
       <li>木魚停了（地鐘結束、只剩講話或雜音）約 4 秒，會顯示「<b>沒聽到木魚</b>」，數字變灰、停在最後的速度，不會亂跳；木魚再敲起來會自動接著算。</li>
       <li><b>沒網路也能用</b>：打開過一次，之後沒網路也打得開。建議用 Safari 的分享鍵「加入主畫面」，從主畫面的圖示打開。</li>
@@ -248,7 +249,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     </ul>
   </section>
   <footer>
-    <div>版本 <b id="ver">0.5</b> · 速度算法沿用「地鐘節拍器 3.3」，調的找法同 3.5</div>
+    <div>版本 <b id="ver">0.5.1</b> · 速度算法沿用「地鐘節拍器 3.3」，調的找法同 3.5</div>
     <button id="update" type="button" class="updbtn">更新到最新版</button>
     <div id="updMsg"></div>
   </footer>
@@ -357,7 +358,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     }
     /* 停一下再按開始：接著同一份；剛看完範例、紀錄或錄音測試：開新的一份 */
     if (!eng || !cur || cur.kind !== "mic" || mode === "sample" || mode === "record") { newSession("mic"); clearDisplay(); }
-    else if (eng.rearm) eng.rearm();   /* 接著同一份：重新開始抓速度，不用等「停了以後」那麼嚴格的判斷 */
+    else if (eng.rearm) eng.rearm();   /* 接著同一份：已經判斷成停了的話，回到「聲音取樣中」，聽到清楚的木魚才出數字 */
     viewRec = null;
     micSrc = ctx.createMediaStreamSource(micStream);
     micSrc.connect(proc);
@@ -628,7 +629,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     if (showWarm) $("warmFill").style.width = Math.round(warm.frac * 100) + "%";
     $("bpm").className = "big" + (b == null ? " dim" : tcls ? " " + tcls : "");
     if (live && eng) $("tempoNote").textContent = b == null ? (stopped ? (held != null ? "停在最後的速度；木魚再敲起來會接著算" : "木魚再敲起來會接著算")
-        : showWarm ? (warm.stalled ? "聽到木魚聲才會繼續倒數" : "收集木魚聲，算出穩定的速度") : "還沒聽到穩定的敲擊") : (conf != null && conf < 0.15 ? "節奏不太清楚" : "");
+        : showWarm ? (warm.stalled ? "聽到清楚、規律的木魚聲才會出數字" : "收集木魚聲，算出穩定的速度") : "還沒聽到穩定的敲擊") : (conf != null && conf < 0.15 ? "節奏不太清楚" : "");
     else if (!live) $("tempoNote").textContent = mode === "sample" ? "範例最後的速度" : "紀錄最後的速度";
     var m = (stopped ? 1 : autoMult) * S.mult;   /* 停了：雜音裡接的倍數不算 */
     $("multInfo").textContent = live && m !== 1 ? "（已" + (!stopped && autoMult !== 1 ? "自動" : "") + "修正 ×" + (m >= 1 ? m : "1/" + (1 / m)) + "）" : "";
