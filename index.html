@@ -102,6 +102,9 @@ button.pill {
 .trend.down, .big.down { color: var(--slow); }
 .trend.wait { font-size: 1.15rem; font-weight: 600; }
 .trend.stop { font-size: 1.3rem; color: var(--muted); }   /* 沒聽到木魚：數字停在最後的速度、灰色 */
+/* 「地鐘開始了」（0.6）：數字還沒出來時，不等木魚聲聽清楚 */
+.forcerow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 2px 0 8px; }
+.forcerow .primary { min-height: 48px; padding-inline: 16px; }
 /* 開頭取樣的倒數進度條 */
 .warmbar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin: 6px 0 10px; }
 .warmbar i { display: block; height: 100%; width: 0; background: var(--wood); border-radius: 3px; transition: width .25s linear; }
@@ -183,6 +186,10 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
       <span id="beat" class="beat" aria-hidden="true" style="margin-left:auto"></span>
     </div>
     <div id="warmBar" class="warmbar" hidden aria-hidden="true"><i id="warmFill"></i></div>
+    <div id="forceRow" class="forcerow" hidden>
+      <button id="forceBtn" type="button" class="primary">⚡ 地鐘開始了</button>
+      <span class="small">不等木魚聲聽清楚，約 10 秒出數字</span>
+    </div>
     <div class="row small">
       算成一半或兩倍時：
       <button id="x2" type="button">×2</button>
@@ -240,7 +247,8 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     <ul>
       <li>手機放在聽得到木魚的地方，<b>螢幕保持亮著</b>（關螢幕或切到別的 App 就會停）。</li>
       <li>聲音只在手機上計算，不錄音、不上傳；紀錄只存數字（速度、調），也只存在這支手機。</li>
-      <li>剛開始會顯示「<b>聲音取樣中</b>」和倒數：速度約 14 秒（木魚聲不清楚時倒數會停住、顯示「等木魚聲」）；調通常唱幾秒就出來，取樣中會顯示百分比。</li>
+      <li>剛開始會顯示「<b>聲音取樣中</b>」和倒數：木魚聲清楚的話約 18 秒出數字，開頭慢板（每分鐘 60 下左右）通常 20～40 秒（木魚聲不清楚時倒數會停住、顯示「等木魚聲」）；調通常唱幾秒就出來，取樣中會顯示百分比。</li>
+      <li>地鐘已經開始、數字還沒出來，可以按「<b>⚡ 地鐘開始了</b>」：不等木魚聲聽清楚，約 10 秒出數字，之後 1 分鐘內不會判斷成停了。還沒打地鐘時不要按，雜音也會算出數字。</li>
       <li>要聽到<b>清楚、規律的木魚聲</b>才會出數字；地鐘還沒開始時，講話、雜音不會出數字。其他有固定節奏的聲音（誦經的木魚、音樂、機器聲）還是會算出速度。</li>
       <li>速度看的是最近十幾下（慢的時候 6 秒、快的時候約 3 秒），加速時畫面大約比實際晚 2 秒。</li>
       <li>木魚停了（地鐘結束、只剩講話或雜音）約 4 秒，會顯示「<b>沒聽到木魚</b>」，數字變灰、停在最後的速度，不會亂跳；木魚再敲起來會自動接著算。</li>
@@ -249,7 +257,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     </ul>
   </section>
   <footer>
-    <div>版本 <b id="ver">0.5.1</b> · 速度算法沿用「地鐘節拍器 3.3」，調的找法同 3.5</div>
+    <div>版本 <b id="ver">0.6</b> · 速度算法沿用「地鐘節拍器 3.3」，調的找法同 3.5</div>
     <button id="update" type="button" class="updbtn">更新到最新版</button>
     <div id="updMsg"></div>
   </footer>
@@ -426,6 +434,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     clearDisplay(); render(true); renderRecs();
   });
 
+  $("forceBtn").addEventListener("click", function () { if (eng && eng.force) { eng.force(); render(true); } });
   $("x2").addEventListener("click", function () { userMult = Math.min(4, userMult * 2); render(true); });
   $("d2").addEventListener("click", function () { userMult = Math.max(0.25, userMult / 2); render(true); });
   $("setRef").addEventListener("click", function () {
@@ -586,7 +595,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
 
   function render(force) {
     viewUI();
-    var bpm = null, key = null, note = null, conf = null, autoMult = 1, keyN = 0, live = isLive(), stopped = false, lastBpm = null, warm = null, keyFrac = 0;
+    var bpm = null, key = null, note = null, conf = null, autoMult = 1, keyN = 0, live = isLive(), stopped = false, lastBpm = null, warm = null, keyFrac = 0, canForce = false;
     var S = currentSeries();
     if (mode === "sample") {
       bpm = lastOf(S.bpm); key = lastOf(S.key);
@@ -597,7 +606,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     } else if (eng) {
       var st = eng.state();
       bpm = st.bpm; key = st.key; note = st.note; conf = st.tempoConf; autoMult = st.autoMult; keyN = st.keyN;
-      stopped = !!st.stopped; lastBpm = st.lastBpm; warm = st.warm; keyFrac = st.keyFrac || 0;
+      stopped = !!st.stopped; lastBpm = st.lastBpm; warm = st.warm; keyFrac = st.keyFrac || 0; canForce = !!st.canForce;
     }
     /* 速度：以 5 為一格（210、215、220…）。差不到一格多一點不換，免得在兩格中間來回跳 */
     var b = bpm != null ? bpm * S.mult : null;
@@ -626,6 +635,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     } else if (live && eng) { trend.textContent = "聽速度中…"; trend.className = "trend wait"; }
     var showWarm = !!(live && eng && warm && b == null && !stopped);
     $("warmBar").hidden = !showWarm;
+    $("forceRow").hidden = !((mode === "mic" || mode === "file") && eng && canForce && b == null);   /* 正在聽、數字還沒出來（取樣中、等木魚聲、停了）才顯示 */
     if (showWarm) $("warmFill").style.width = Math.round(warm.frac * 100) + "%";
     $("bpm").className = "big" + (b == null ? " dim" : tcls ? " " + tcls : "");
     if (live && eng) $("tempoNote").textContent = b == null ? (stopped ? (held != null ? "停在最後的速度；木魚再敲起來會接著算" : "木魚再敲起來會接著算")

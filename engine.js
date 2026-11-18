@@ -2,8 +2,9 @@
  * 只做計算、不碰畫面：手機網頁（index.html）和電腦上的比對測試（test/compare.js）共用這一份。
  * 演算法沿用「地鐘節拍器 3.3」的離線分析，改成邊聽邊算：
  *   速度：法器聲頻帶（400–5000 Hz）的頻譜差分 → 最近幾秒做自相關＋梳狀加權 → 只往前看的 Viterbi（速度要連續）
+ *         開頭慢板另看「強的起音是不是大多落在固定間隔的格子上」（0.6）
  *   音高：YIN 量基頻 → 最近 20 秒唱得穩的點 → 音名圈上找「阿」（下面空、上面有彌和陀佛，0.5 起同「地鐘節拍器 3.5」）＝現在的調
- * 用法：var eng = DZ.createEngine({sampleRate: 48000}); eng.push(Float32Array 單聲道); eng.state();
+ * 用法：var eng = DZ.createEngine({sampleRate: 48000}); eng.push(Float32Array 單聲道); eng.state(); eng.force()（「地鐘開始了」）
  */
 (function (root) {
   "use strict";
@@ -214,6 +215,25 @@
       trustSec: opt.trustSec != null ? opt.trustSec : 6,
       /* 0.5.1：還沒顯示（剛開始聽、停了以後）時，連續幾秒都不清楚就從頭抓，免得雜音裡追到的速度、倍數帶進木魚聲（實測會先顯示兩倍 6 秒） */
       resetSec: opt.resetSec != null ? opt.resetSec : 2,
+      /* 0.6 慢板格子：開頭每分鐘 60 下左右，6 秒只有 6 下，上面的「對得上」常常不成立。另外看最近 gridWin 秒的起音：
+       * 找一組固定間隔的格子，強的起音（最近起音中位數的 gridHit 倍）大多落在格子上、格子外的強起音少（分數＝落在格子上的比例－格子外強起音占的比例），
+       * 最近 gridHold 次（每 0.5 秒一次）有 gridFrac 以上分數 ≥ gridScore、速度差 gridTol2 以內，就算慢板木魚聽清楚了。只在 gridMax 下／分以下用 */
+      grid: opt.grid != null ? opt.grid : 1,
+      gridWin: opt.gridWin || 10,
+      gridHit: opt.gridHit != null ? opt.gridHit : 2,
+      gridHitOn: opt.gridHitOn != null ? opt.gridHitOn : 1.5,   /* 已經在顯示（只用來判斷還有沒有在敲）時放寬：慢板有時唱誦的起音跟木魚差不多強 */
+      gridOff: opt.gridOff != null ? opt.gridOff : 2,
+      gridTol: opt.gridTol != null ? opt.gridTol : 0.06,
+      gridScore: opt.gridScore != null ? opt.gridScore : 0.3,
+      gridHold: opt.gridHold || 12,
+      gridFrac: opt.gridFrac != null ? opt.gridFrac : 0.75,
+      gridTol2: opt.gridTol2 != null ? opt.gridTol2 : 0.06,
+      gridMax: opt.gridMax || 130,
+      gridStart: opt.gridStart != null ? opt.gridStart : 3,      /* 格子連續聽清楚幾秒才開始顯示 */
+      /* 靠格子開始顯示的，probation 秒內就判斷停了：當作誤判（規律的雜音、別的法器），不留灰色數字，回到等木魚聲 */
+      probation: opt.probation != null ? opt.probation : 40,
+      /* 0.6「地鐘開始了」按鈕：按了以後這麼多秒內不判斷停了 */
+      forceHold: opt.forceHold != null ? opt.forceHold : 60,
       keyWin: opt.keyWin || 20             /* 「現在的調」看最近幾秒 */
     };
 
@@ -250,6 +270,11 @@
     var GH = Math.round(6 / P.tempoEvery), gHist = new Uint8Array(GH), gN = 0;
     var TEMPO_EVERY_F = Math.max(1, Math.round(P.tempoEvery * FPS));
     var seg = new Float32Array(Math.ceil(P.tempoWin * FPS) + 2);
+    /* 慢板格子（0.6）：最近的起音事件、候選間隔（0.43～1.4 秒，每格 1%） */
+    var OKEEP = 512, onT = new Float64Array(OKEEP), onC = new Float32Array(OKEEP), onN = 0;
+    var GP = [], gq;
+    for (gq = 0; gq <= 120; gq++) GP.push(0.43 * Math.pow(1.4 / 0.43, gq / 120));
+    var gridHist = [], gridBpm = 0, gridSince = -1, gridTick = 0, forceUntil = -1, gridStartT = -1e9;
 
     /* ---------- 音高前端 ---------- */
     var hp = makeHighpass(70, SR);
@@ -263,6 +288,7 @@
     var history = [], lastHistT = -1;
 
     function now() { return (pcount) / SR; }
+    function tNow() { return nFrames * HOP / TSR; }   /* 速度那邊的時間（跟 updateTempo 的 t 同一把尺） */
 
     function onTempoFrame() {
       /* 一個 STFT 影格 */
@@ -297,7 +323,10 @@
         for (k = 1; k <= 5; k++) if (k !== 3 && osfRing[(nFrames - k) % K] > c) { isMax = false; break; }
         var mean = onsetMeanSum / Math.min(nFrames, ONW);
         var tOn = (nFrames - 3) * HOP / TSR + N / TSR / 2;
-        if (isMax && c > 2.2 * mean + 1e-6 && tOn - lastOnsetT > 0.12) { lastOnsetT = tOn; onsetCount++; }
+        if (isMax && c > 2.2 * mean + 1e-6 && tOn - lastOnsetT > 0.12) {
+          lastOnsetT = tOn; onsetCount++;
+          onT[onN % OKEEP] = tOn; onC[onN % OKEEP] = c; onN++;
+        }
       }
 
       framesSinceTempo++;
@@ -328,10 +357,11 @@
       tempoLevel = 20 * Math.log(lvs[Math.floor(len * 0.95)] + 1e-12) / Math.LN10;
       obsBest = -1;
       if (sc) { obsBest = 0; for (k = 1; k < M; k++) if (sc.s[k] > sc.s[obsBest]) obsBest = k; }
+      if (P.grid && (gridTick++ & 1) === 0) gridUpdate(t);
       /* 太小聲（安靜的房間，只有冷氣、電器聲）或節奏不明確：不更新速度 */
       if (!sc || sc.conf < P.minConf || tempoLevel < P.minLevel) { tempoConf = sc ? sc.conf : 0; judgeBeat(t, false, nUpd * P.tempoEvery); return; }
       tempoConf = sc.conf;
-      if (lastGoodTempoT > 0 && t - lastGoodTempoT > 6) {   /* 停了一陣子再開始：重新抓 */
+      if (lastGoodTempoT > 0 && t - lastGoodTempoT > 6 && !gridAgrees()) {   /* 停了一陣子再開始：重新抓（慢板格子還聽得到同樣的速度就不用） */
         V = null; nUpd = 0; mult = 1; lastOut = 0; bpmSmooth = 0; tN = tG = 0;
       }
       var obs = sc.s, j, p;
@@ -395,11 +425,82 @@
         if (jumpSince < 0 || Math.abs(Math.log(b / jumpRef) / Math.LN2) > P.jumpOct / 2 + P.rampOct * (t - jumpSince)) { jumpSince = t; jumpRef = b; }
       } else jumpSince = -1;
       if (upSec >= P.trustSec) { tN++; if (agree) tG++; }   /* 追蹤滿 trustSec 秒以後，清楚的占幾成（畫面倒數用） */
-      judgeBeat(t, agree && upSec >= P.trustSec, upSec);
-      if (agree && beatOn && bi < M - 3 && (!jump || t - jumpSince >= P.jumpHold)) {
+      var seeded = judgeBeat(t, agree && upSec >= P.trustSec, upSec);
+      if (!seeded && agree && beatOn && bi < M - 3 && (!jump || t - jumpSince >= P.jumpHold)) {
         bpmSmooth = bpmSmooth ? bpmSmooth + (b - bpmSmooth) * P.smooth : b;
         dispT = t; dispMult = mult;
       }
+    }
+
+    /* ---------- 慢板格子（0.6） ---------- */
+    function gridEval(t, hit) {
+      var W = P.gridWin, t0 = t - W, ts = [], st = [], q;
+      for (q = Math.max(0, onN - OKEEP); q < onN; q++) {
+        var a = onT[q % OKEEP];
+        if (a >= t0 && a <= t) { ts.push(a); st.push(onC[q % OKEEP]); }
+      }
+      var n = ts.length;
+      if (n < 4) return null;
+      var srt = st.slice().sort(function (x, y) { return x - y; });
+      var med = n & 1 ? srt[n >> 1] : (srt[n / 2 - 1] + srt[n / 2]) / 2;
+      if (!(med > 0)) return null;
+      var strong = [], bigSum = 0;
+      for (q = 0; q < n; q++) {
+        st[q] /= med;
+        if (st[q] >= hit) strong.push(q);
+        if (st[q] >= P.gridOff) bigSum += st[q];
+      }
+      if (strong.length < 4) return null;
+      var on = new Uint8Array(n), best = null;
+      for (var pi = 0; pi < GP.length; pi++) {
+        var per = GP[pi];
+        if (Math.floor(W / per) < 5) continue;
+        var w = P.gridTol * per;
+        for (var si = 0; si < strong.length; si++) {
+          var ph = (ts[strong[si]] - t0) % per, hits = 0, ng = 0, lo = 0, h;
+          on.fill(0);
+          for (var g = t0 + ph; g <= t; g += per) {
+            ng++;
+            while (lo < n && ts[lo] < g - w) lo++;
+            var mx = 0;
+            for (h = lo; h < n && ts[h] <= g + w; h++) { on[h] = 1; if (st[h] > mx) mx = st[h]; }
+            if (mx >= hit) hits++;
+          }
+          var offS = 0;
+          for (q = 0; q < n; q++) if (!on[q] && st[q] >= P.gridOff) offS += st[q];
+          var scr = hits / ng - (bigSum > 0 ? offS / bigSum : 0);
+          if (!best || scr > best.sc + 0.03 || (Math.abs(scr - best.sc) <= 0.03 && per > best.per)) best = { sc: scr, per: per };
+        }
+      }
+      return best;
+    }
+    /* 每 0.5 秒：還沒顯示、顯示的速度在 gridMax 以下、或按了「地鐘開始了」以後 forceHold 秒內才算（快了就不用，省電） */
+    function gridUpdate(t) {
+      if (beatOn && bpmSmooth > 0 && bpmSmooth >= P.gridMax * 1.15 && t >= forceUntil) { gridHist.length = 0; gridBpm = 0; return; }
+      var b = gridEval(t, beatOn ? P.gridHitOn : P.gridHit);
+      gridHist.push(b && b.sc >= P.gridScore && tempoLevel >= P.minLevel ? 60 / b.per : 0);
+      if (gridHist.length > P.gridHold) gridHist.shift();
+      gridBpm = 0;
+      if (gridHist.length < P.gridHold) return;
+      var v = gridHist.filter(function (x) { return x > 0; }).sort(function (x, y) { return x - y; });
+      if (v.length < P.gridFrac * P.gridHold) return;
+      var m = v.length & 1 ? v[v.length >> 1] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2, ok = 0;
+      for (var q = 0; q < v.length; q++) if (Math.abs(v[q] / m - 1) < P.gridTol2) ok++;
+      if (ok >= P.gridFrac * P.gridHold && m >= 45 && m <= P.gridMax) gridBpm = m;
+    }
+    /* 開始顯示，追蹤從這個速度接著抓（慢板格子、或按了「地鐘開始了」時已經有格子速度）。
+     * 倍數接回以這個速度為準，追蹤跑到兩倍也會接回來 */
+    /* 顯示中、慢板格子聽到的速度跟畫面一樣（差 7% 內）：唱誦蓋過木魚、上面的節奏明確度不夠時，數字照樣留著 */
+    function gridAgrees() {
+      return beatOn && gridBpm > 0 && bpmSmooth > 0 && Math.abs(Math.log(gridBpm / bpmSmooth) / Math.LN2) < 0.1;
+    }
+    function seedAt(t, bpm) {
+      beatOn = true; everOn = true; resumeSince = -1; onSince = t; unclear = 0; gridSince = -1; gridHist.length = 0;
+      var j0 = Math.max(0, Math.min(M - 1, Math.round(Math.log(bpm / 45) / Math.LN2 / LSTEP)));
+      V = new Float32Array(M);
+      for (var j = 0; j < M; j++) V[j] = -2 * Math.abs(j - j0) * LSTEP;
+      nUpd = Math.ceil(10 / P.tempoEvery) + 1; tempoIdx = j0; lastGoodTempoT = t;
+      mult = 1; lastOut = bpm; bpmSmooth = bpm; dispT = t; dispMult = 1; jumpSince = -1; tN = tG = 0;
     }
 
     function clarity() {
@@ -412,16 +513,28 @@
      * 剛開始聽、停了以後，都要最近 6 秒九成左右都清楚、持續 resumeSec 秒才顯示，講話、雜音不會讓數字跑出來 */
     function judgeBeat(t, good, upSec) {
       gHist[gN % GH] = good ? 1 : 0; gN++;
-      if (good) lastBeatT = t;
       if (beatOn) {
+        /* 按了「地鐘開始了」以後 forceHold 秒內：數字還沒出來、或畫面的速度跟格子不一樣又不是一直都清楚（按得早，追到開頭的雜音或倍數），
+         * 格子聽到慢板速度就改從那個速度接著算。數字已經出來、木魚又清楚時按鈕不會出現，所以這段時間幾乎都是地鐘剛開始的慢板 */
+        if (t < forceUntil && gridBpm && (bpmSmooth <= 0 || upSec < 10 || (!gridAgrees() && clarity() < P.resumeFrac))) { seedAt(t, gridBpm); return true; }
         var ref = bpmSmooth > 0 ? bpmSmooth : lastOut, per = ref > 0 ? 60 / ref : 0.2;   /* 用畫面上的速度（雜音裡接的倍數不算） */
+        /* 慢板：格子聽得到、速度跟畫面一樣，也算有在敲（開頭慢板「對得上」常常不成立，免得被判成停了） */
+        if (good || (gridBpm && ref > 0 && Math.abs(Math.log(gridBpm / ref) / Math.LN2) < 0.1)) lastBeatT = t;
         if (onSince < 0 && upSec > 10) onSince = t;     /* 開始顯示 */
-        if (onSince >= 0 && t - onSince >= P.stopAfter && lastBeatT > -1e8 && t - lastBeatT > Math.max(P.stopMin, P.stopBeats * per)) {
+        if (t >= forceUntil && onSince >= 0 && t - onSince >= P.stopAfter && lastBeatT > -1e8 && t - lastBeatT > Math.max(P.stopMin, P.stopBeats * per)) {
           beatOn = false; resumeSince = -1; onSince = -1;
-          stopBpm = bpmSmooth > 0 ? bpmSmooth : null;
+          stopBpm = bpmSmooth > 0 ? bpmSmooth : null; gridHist.length = 0; gridBpm = 0;
+          if (t - gridStartT < P.probation) { everOn = false; stopBpm = null; lastBeatT = -1e9; }   /* 靠格子剛開始顯示就停了：當作沒聽到過 */
+          gridStartT = -1e9;
           V = null; nUpd = 0; mult = 1; lastOut = 0; bpmSmooth = 0; jumpSince = -1; dispMult = 1; tN = tG = 0;   /* 重新開始時從頭抓 */
         }
       } else {
+        if (good) lastBeatT = t;
+        /* 慢板格子連續聽清楚 resumeSec 秒：從格子的速度開始顯示 */
+        if (gridBpm) {
+          if (gridSince < 0) gridSince = t;
+          if (t - gridSince >= P.gridStart) { seedAt(t, gridBpm); gridStartT = t; return true; }
+        } else gridSince = -1;
         var s = 0;
         for (var q = 0; q < GH; q++) s += gHist[q];
         if (gN >= GH && s / GH >= P.resumeFrac) {
@@ -547,9 +660,9 @@
     function state() {
       var t = now();
       if (t - cachedAt >= 0.2 || !cachedPitch) { cachedPitch = pitchStats(t); cachedAt = t; }
-      var live = beatOn && bpmSmooth > 0 && tempoIdx >= 0 && nUpd * P.tempoEvery >= 10 && t - lastGoodTempoT < 4;   /* 剛開始 10 秒的估計還在跳，不顯示 */
+      var live = beatOn && bpmSmooth > 0 && tempoIdx >= 0 && nUpd * P.tempoEvery >= 10 && (t - lastGoodTempoT < 4 || gridAgrees());   /* 剛開始 10 秒的估計還在跳，不顯示 */
       /* 開頭取樣：先收 4 秒聲音才算第一次；追蹤 trustSec 秒以後，最近 6 秒 85% 清楚、持續 3 秒才顯示，順利的話追蹤約 14.5 秒。給畫面倒數用 */
-      var warm = null, upSec = nUpd * P.tempoEvery, WARM = 14.5;
+      var warm = null, upSec = nUpd * P.tempoEvery, WARM = beatOn ? 10 : 14.5;   /* 按了「地鐘開始了」：追蹤滿 10 秒就顯示 */
       if (!everOn || (beatOn && (upSec < 10 || bpmSmooth <= 0))) {
         var left = Math.max(0, 4 - nFrames / FPS) + Math.max(0, WARM - upSec);
         /* 沒聽到清楚的木魚聲：倒數停住、顯示等木魚聲。因為不清楚從頭抓過以後，要追蹤滿 trustSec 秒、確定清楚才再倒數 */
@@ -574,7 +687,10 @@
         keyN: cachedPitch.keyN,
         keyFrac: cachedPitch.key != null ? 1 : Math.min(1, cachedPitch.keyN / 30),   /* 調的取樣進度（唱得穩的點要 30 個） */
         warm: warm,                       /* 速度還在取樣：{ left 剩幾秒, frac 進度, stalled 等木魚聲 }，其他時候 null */
-        clarity: clarity()                /* 最近 6 秒「清楚的一次」占幾成（測試用） */
+        clarity: clarity(),               /* 最近 6 秒「清楚的一次」占幾成（測試用） */
+        gridBpm: gridBpm,                 /* 慢板格子聽到的速度，0＝沒有（測試用） */
+        canForce: !beatOn,                /* 可以按「地鐘開始了」（還沒顯示數字、或判斷成停了） */
+        forced: tNow() < forceUntil       /* 按了「地鐘開始了」以後 forceHold 秒內（不判斷停了） */
       };
     }
 
@@ -589,6 +705,14 @@
     api.reset = reset;
     /* 使用者停止後重新按開始：已經判斷成停了的話，回到剛開始聽的樣子（顯示取樣中，聽到清楚的木魚才出數字） */
     api.rearm = function () { if (!beatOn) { everOn = false; stopBpm = null; lastBeatT = -1e9; resumeSince = -1; onSince = -1; unclear = 0; everReset = false; } };
+    /* 「地鐘開始了」：不等木魚聲聽清楚，追蹤滿 10 秒就顯示（已經有格子速度就從那個速度直接顯示）；forceHold 秒內不判斷停了 */
+    api.force = function () {
+      if (beatOn) return;
+      var t = tNow();
+      if (gridBpm) seedAt(t, gridBpm);
+      else { beatOn = true; everOn = true; resumeSince = -1; onSince = -1; unclear = 0; gridSince = -1; gridHist.length = 0; }
+      forceUntil = t + P.forceHold; gridStartT = -1e9;
+    };
     api.sampleRate = SR;
     return api;
   }
