@@ -62,19 +62,22 @@ body {
 header.top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
 h1 { font-size: 1.15rem; margin: 0; letter-spacing: .04em; }
 h2 { font-size: 1rem; margin: 0 0 6px; }
-/* 狀態標籤（0.4.2 放大）：聆聽中＝實心綠＋閃動圓點；已停止／暫停＝方塊 */
-.pill {
-  display: inline-flex; align-items: center; gap: .4em;
-  font-size: 1.3rem; font-weight: 700; line-height: 1.2; padding: 7px 16px; border-radius: 999px; white-space: nowrap;
-  background: var(--bronze-soft); color: var(--bronze); border: 2px solid transparent;
+/* 最上面的開始／停止按鈕，同時顯示狀態（0.4.3：原本右上角的狀態標籤＋最下面的「開始聆聽」合併）
+ * 沒在聽：銅色「▶ 開始聆聽」，下面一行小字是狀態（已停止、範例…）；聆聽中：實心綠＋閃動圓點，下面「按一下停止」 */
+button.pill {
+  display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  min-height: 58px; min-width: 9.5em; padding: 6px 18px; border-radius: 16px; white-space: nowrap;
+  background: var(--bronze); border: 2px solid var(--bronze); color: var(--surface);
 }
-.pill.live { background: var(--good); border-color: var(--good); color: var(--surface); }
-.pill.live::before { content: ""; width: .55em; height: .55em; border-radius: 50%; background: currentColor; animation: pillPulse 1.2s ease-in-out infinite; }
-.pill.off { border-color: var(--bronze); }
-.pill.off::before { content: ""; width: .5em; height: .5em; border-radius: 2px; background: currentColor; }
-.pill.err { background: transparent; border-color: var(--bad); color: var(--bad); }
+.pill .main { display: inline-flex; align-items: center; gap: .4em; font-size: 1.3rem; font-weight: 700; line-height: 1.2; }
+.pill .sub { font-size: .8rem; font-weight: 600; line-height: 1.2; opacity: .9; }
+.pill .sub:empty { display: none; }
+.pill.live { background: var(--good); border-color: var(--good); }
+.pill.live .main::before { content: ""; width: .55em; height: .55em; border-radius: 50%; background: currentColor; animation: pillPulse 1.2s ease-in-out infinite; }
+.pill.err { border-color: var(--bad); }
+.pill.err .sub { background: var(--surface); color: var(--bad); border-radius: 6px; padding: 0 6px; opacity: 1; }
 @keyframes pillPulse { 50% { opacity: .25; } }
-@media (prefers-reduced-motion: reduce) { .pill.live::before { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .pill.live .main::before { animation: none; } }
 /* 範例／紀錄提示條 */
 .banner {
   display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px;
@@ -162,12 +165,11 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
 <main class="wrap">
   <header class="top">
     <h1>地鐘即時分析</h1>
-    <span id="status" class="pill">範例</span>
+    <button id="start" class="pill" type="button"><span id="startMain" class="main">▶ 開始聆聽</span><span id="status" class="sub">現在是範例</span></button>
   </header>
 
   <div id="banner" class="banner">
     <p id="bannerText"><b>這是範例</b>：0902 共修地鐘錄音算出來的，不是現場的聲音。</p>
-    <button id="start2" type="button">開始聆聽</button>
   </div>
 
   <section class="card" aria-labelledby="lblTempo">
@@ -221,7 +223,6 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
   </section>
 
   <section class="controls">
-    <button id="start" class="primary" type="button">開始聆聽</button>
     <label class="filebtn" for="file">用錄音測試<input id="file" type="file" accept="audio/*,video/*"></label>
     <button id="reset" type="button">清除重來</button>
   </section>
@@ -247,7 +248,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     </ul>
   </section>
   <footer>
-    <div>版本 <b id="ver">0.4.2</b> · 算法沿用「地鐘節拍器 3.3」</div>
+    <div>版本 <b id="ver">0.4.3</b> · 算法沿用「地鐘節拍器 3.3」</div>
     <button id="update" type="button" class="updbtn">更新到最新版</button>
     <div id="updMsg"></div>
   </footer>
@@ -309,7 +310,23 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     cur = { id: now.getTime(), kind: kind, startedAt: now.getTime(),
             name: kind === "mic" ? "現場聆聽" : name };
   }
-  function setStatus(text, cls) { var s = $("status"); s.textContent = text; s.className = "pill" + (cls ? " " + cls : ""); }
+  var statusText = "現在是範例", statusCls = "";
+  function setStatus(text, cls) { statusText = text; statusCls = cls || ""; paintStart(); }
+  /* 最上面的按鈕：在聽（麥克風或錄音測試播放中）＝綠色「聆聽中／播放測試．按一下停止」；其他＝「▶ 開始聆聽」＋狀態 */
+  function paintStart() {
+    var b = $("start"), mic = mode === "mic", play = mode === "file" && !player.paused;
+    if (mic || play) {
+      $("startMain").textContent = mic ? "聆聽中" : "播放測試";
+      $("status").textContent = "按一下停止";
+      b.className = "pill live";
+      b.setAttribute("aria-label", (mic ? "聆聽中" : "播放測試") + "，按一下停止");
+    } else {
+      $("startMain").textContent = "▶ 開始聆聽";
+      $("status").textContent = statusText;
+      b.className = "pill" + (statusCls === "err" ? " err" : "");
+      b.setAttribute("aria-label", "開始聆聽" + (statusText ? "（" + statusText + "）" : ""));
+    }
+  }
 
   async function keepAwake() {
     try { if (navigator.wakeLock) wake = await navigator.wakeLock.request("screen"); } catch (e) { wake = null; }
@@ -347,7 +364,6 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     mode = "mic";
     setStatus("聆聽中", "live");
     $("chartName").textContent = cur.name;
-    $("start").textContent = "停止"; $("start").classList.add("stop");
     keepAwake();
     render(true); renderRecs();
   }
@@ -356,12 +372,15 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     if (micStream) { micStream.getTracks().forEach(function (t) { t.stop(); }); micStream = null; }
     if (wake) { try { wake.release(); } catch (e) {} wake = null; }
     if (mode === "mic") { mode = "stopped"; setStatus("已停止", "off"); saveCur(); }
-    $("start").textContent = "開始聆聽"; $("start").classList.remove("stop");
+    paintStart();
     renderRecs();
   }
-  function onStartClick() { if (mode === "mic") stopMic(); else startMic(); }
+  function onStartClick() {
+    if (mode === "mic") stopMic();
+    else if (mode === "file" && !player.paused) stopFile();
+    else startMic();
+  }
   $("start").addEventListener("click", onStartClick);
-  $("start2").addEventListener("click", onStartClick);
 
   function stopFile() {
     if (!player.paused) player.pause();
@@ -490,14 +509,14 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     var d = load("rec." + id, null);
     if (!d) { $("recMsg").textContent = "這份紀錄讀不到了。"; return; }
     viewRec = d; mode = "record";
-    setStatus("看紀錄");
+    setStatus("正在看紀錄");
     clearDisplay(); render(true); renderRecs();
     $("banner").scrollIntoView({ behavior: "smooth", block: "start" });
   }
   function removeRec(id) {
     drop("rec." + id);
     save("recs", recIndex().filter(function (m) { return m.id !== id; }));
-    if (viewRec && viewRec.id === id) { viewRec = null; mode = "sample"; setStatus("範例"); clearDisplay(); render(true); }
+    if (viewRec && viewRec.id === id) { viewRec = null; mode = "sample"; setStatus("現在是範例"); clearDisplay(); render(true); }
     if (cur && cur.id === id && !busy()) { cur = null; eng = null; }
     renderRecs();
   }
