@@ -232,6 +232,16 @@
       gridStart: opt.gridStart != null ? opt.gridStart : 3,      /* 格子連續聽清楚幾秒才開始顯示 */
       /* 靠格子開始顯示的，probation 秒內就判斷停了：當作誤判（規律的雜音、別的法器），不留灰色數字，回到等木魚聲 */
       probation: opt.probation != null ? opt.probation : 40,
+      /* 0.7 地鐘儀表板（使用者：「只會測地鐘的速度」「不可能超過400」「一開始大約50~60」「中間會慢慢加速，不會跳太快」
+       * 「數字可以掉下，就是警示打地鐘的菩薩」）。12 支地鐘錄音（節拍器 3.5 整段分析）：開頭 45～70、最高 163～355、每 10 秒最多快 8～10%。
+       * 速度範圍 minBpm～maxBpm。追到的速度、它的兩倍、它的一半，挑最接近「最近 dashTrend 秒畫面數字的中位數」的那個：
+       * 一下子跳成兩倍或一半是算錯，換算回來；菩薩真的放慢、加快是一點一點變，中位數跟著走，照實顯示 */
+      minBpm: opt.minBpm || 45,         /* 錄音裡地鐘開頭最慢 45；0.7 試過 40，追蹤會停在一半（農禪寺 82 → 41）*/
+      maxBpm: opt.maxBpm || 400,
+      dashTrend: opt.dashTrend || 10,
+      dashReset: opt.dashReset != null ? opt.dashReset : 90,   /* 停了超過這麼多秒再恢復，當作新的一次地鐘，不接著之前的數字 */
+      fastStart: opt.fastStart || 130,                          /* 這一份還沒出過數字、速度在這以上（地鐘開頭不會這麼快）要清楚得久一點 */
+      fastStartSec: opt.fastStartSec != null ? opt.fastStartSec : 10,
       /* 0.6「地鐘開始了」按鈕：按了以後這麼多秒內不判斷停了 */
       forceHold: opt.forceHold != null ? opt.forceHold : 60,
       keyWin: opt.keyWin || 20             /* 「現在的調」看最近幾秒 */
@@ -253,8 +263,10 @@
     var lastOnsetT = -1, onsetCount = 0;
 
     /* 速度格點與 Viterbi */
-    var M = 240, BPMS = new Float32Array(M), LSTEP = Math.log(480 / 45) / Math.LN2 / (M - 1);
-    for (i = 0; i < M; i++) BPMS[i] = 45 * Math.pow(2, i * LSTEP);
+    /* 速度格點：minBpm～maxBpm（0.7 前 45～480），每格寬度不變（約 1%），Viterbi 的代價照舊 */
+    var LSTEP = Math.log(480 / 45) / Math.LN2 / 239, BMIN = P.minBpm;
+    var M = Math.round(Math.log(P.maxBpm / BMIN) / Math.LN2 / LSTEP) + 1, BPMS = new Float32Array(M);
+    for (i = 0; i < M; i++) BPMS[i] = BMIN * Math.pow(2, i * LSTEP);
     var TCOST = new Float32Array(M), CS = P.tempoEvery / 0.5;
     for (i = 0; i < M; i++) { var d = i * LSTEP; TCOST[i] = CS * (P.costA * d + P.costB * Math.max(0, d - P.costT * CS)); }
     var V = null, NV = new Float32Array(M), nUpd = 0, framesSinceTempo = 0;
@@ -275,6 +287,8 @@
     var GP = [], gq;
     for (gq = 0; gq <= 120; gq++) GP.push(0.43 * Math.pow(1.4 / 0.43, gq / 120));
     var gridHist = [], gridBpm = 0, gridSince = -1, gridTick = 0, forceUntil = -1, gridStartT = -1e9;
+    /* 地鐘儀表板（0.7）：畫面上的數字 dash、上次換數字的時間、換算的倍數；一直不一樣的起點和值；這一份出過數字沒 */
+    var dash = 0, dashF = 1, lastCand = 0, sessionShown = false, stopT = -1e9, dashHist = [];   /* dashHist：最近畫面的數字 [時間, 速度] */
 
     /* ---------- 音高前端 ---------- */
     var hp = makeHighpass(70, SR);
@@ -359,7 +373,7 @@
       if (sc) { obsBest = 0; for (k = 1; k < M; k++) if (sc.s[k] > sc.s[obsBest]) obsBest = k; }
       if (P.grid && (gridTick++ & 1) === 0) gridUpdate(t);
       /* 太小聲（安靜的房間，只有冷氣、電器聲）或節奏不明確：不更新速度 */
-      if (!sc || sc.conf < P.minConf || tempoLevel < P.minLevel) { tempoConf = sc ? sc.conf : 0; judgeBeat(t, false, nUpd * P.tempoEvery); return; }
+      if (!sc || sc.conf < P.minConf || tempoLevel < P.minLevel) { tempoConf = sc ? sc.conf : 0; judgeBeat(t, false, nUpd * P.tempoEvery); dashUpdate(t); return; }
       tempoConf = sc.conf;
       if (lastGoodTempoT > 0 && t - lastGoodTempoT > 6 && !gridAgrees()) {   /* 停了一陣子再開始：重新抓（慢板格子還聽得到同樣的速度就不用） */
         V = null; nUpd = 0; mult = 1; lastOut = 0; bpmSmooth = 0; tN = tG = 0;
@@ -400,21 +414,21 @@
       /* 拋物線內插讓數字細一點 */
       if (bi > 0 && bi < M - 1) {
         var a0 = V[bi - 1], b0 = V[bi], c0 = V[bi + 1], den = a0 - 2 * b0 + c0;
-        if (den < 0) b = 45 * Math.pow(2, (bi + Math.max(-0.5, Math.min(0.5, 0.5 * (a0 - c0) / den))) * LSTEP);
+        if (den < 0) b = BMIN * Math.pow(2, (bi + Math.max(-0.5, Math.min(0.5, 0.5 * (a0 - c0) / den))) * LSTEP);
       }
       /* 地鐘只會越敲越快，突然變一半或兩倍不是真的。剛開始 10 秒還在找速度，不接 */
       if (lastOut && upSec > 10) {
         var dd = Math.log(b * mult / lastOut) / Math.LN2;
         if (Math.abs(dd) > 0.6) {
           var nm = mult * Math.pow(2, -Math.round(dd));
-          if (nm >= 0.25 && nm <= 4) mult = nm;
+          if (nm >= 0.25 && nm <= 4 && b * nm >= BMIN * 0.9 && b * nm <= P.maxBpm * 1.05) mult = nm;   /* 0.7：接回後也要在速度範圍內 */
         }
       }
       b *= mult;
       lastOut = b;
       /* 以上是追速度本身（同 0.3.1）。以下只管畫面：
        * 這一次單獨看的最高點跟追蹤的對得上（含兩倍、一半、1.5 倍），才算「清楚的一次」，拿來判斷停了沒。
-       * 畫面上的數字另外要求：不是貼著上限 480（收尾滾奏），也沒有突然跳（跳過去持續 jumpHold 秒才接受） */
+       * 畫面上的數字另外要求：不是貼著上限 maxBpm（收尾滾奏），也沒有突然跳（跳過去持續 jumpHold 秒才接受） */
       var dOct = obsBest >= 0 ? Math.abs(obsBest - bi) * LSTEP : 9;
       var agree = Math.min(dOct, Math.abs(dOct - 1), Math.abs(dOct - 0.585)) < P.agreeTol;
       /* 地鐘只會越敲越快：數字停住幾秒後，往上可以多跳一點（每秒 rampOct）；往下一次掉超過門檻就是收尾或雜音 */
@@ -430,6 +444,7 @@
         bpmSmooth = bpmSmooth ? bpmSmooth + (b - bpmSmooth) * P.smooth : b;
         dispT = t; dispMult = mult;
       }
+      dashUpdate(t);
     }
 
     /* ---------- 慢板格子（0.6） ---------- */
@@ -476,7 +491,8 @@
     }
     /* 每 0.5 秒：還沒顯示、顯示的速度在 gridMax 以下、或按了「地鐘開始了」以後 forceHold 秒內才算（快了就不用，省電） */
     function gridUpdate(t) {
-      if (beatOn && bpmSmooth > 0 && bpmSmooth >= P.gridMax * 1.15 && t >= forceUntil) { gridHist.length = 0; gridBpm = 0; return; }
+      var shown = dash > 0 ? dash : bpmSmooth;
+      if (beatOn && shown > 0 && shown >= P.gridMax * 1.15 && t >= forceUntil) { gridHist.length = 0; gridBpm = 0; return; }
       var b = gridEval(t, beatOn ? P.gridHitOn : P.gridHit);
       gridHist.push(b && b.sc >= P.gridScore && tempoLevel >= P.minLevel ? 60 / b.per : 0);
       if (gridHist.length > P.gridHold) gridHist.shift();
@@ -486,17 +502,51 @@
       if (v.length < P.gridFrac * P.gridHold) return;
       var m = v.length & 1 ? v[v.length >> 1] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2, ok = 0;
       for (var q = 0; q < v.length; q++) if (Math.abs(v[q] / m - 1) < P.gridTol2) ok++;
-      if (ok >= P.gridFrac * P.gridHold && m >= 45 && m <= P.gridMax) gridBpm = m;
+      if (ok >= P.gridFrac * P.gridHold && m >= Math.max(45, BMIN) && m <= P.gridMax) gridBpm = m;
     }
     /* 開始顯示，追蹤從這個速度接著抓（慢板格子、或按了「地鐘開始了」時已經有格子速度）。
      * 倍數接回以這個速度為準，追蹤跑到兩倍也會接回來 */
+    /* 地鐘儀表板（0.7）：bpmSmooth 有新的值就決定畫面的數字。
+     * 追到的速度、兩倍、一半，挑最接近最近 dashTrend 秒畫面數字中位數的那個（範圍外的不挑）。
+     * 試過的：跟畫面上那一個數字比、差 7% 內才換算 → 畫面本身偏高時接不回來（0820 第 11 分 226 → 89）；也換算 1.5 倍、2/3 → 沒比較好；
+     * 慢板格子決定倍數 → 90～130 格子會偏一半（0902、0922、舊金山變差），不用 */
+    function dashUpdate(t) {
+      if (!beatOn || !(bpmSmooth > 0) || bpmSmooth === lastCand) return;
+      lastCand = bpmSmooth;
+      var c = bpmSmooth, f = 1;
+      /* 最近 dashTrend 秒的畫面數字；中間斷過（停了、沒更新）就用斷之前最後的那幾個（dashReset 秒內） */
+      var last = dashHist.length ? dashHist[dashHist.length - 1][0] : -1e9;
+      while (dashHist.length && dashHist[0][0] < Math.min(t, last + 1) - P.dashTrend) dashHist.shift();
+      if (dashHist.length && t - last > P.dashReset) dashHist.length = 0;
+      if (dashHist.length) {
+        var v = dashHist.map(function (x) { return x[1]; }).sort(function (x, y) { return x - y; });
+        var n = v.length, trend = n & 1 ? v[n >> 1] : (v[n / 2 - 1] + v[n / 2]) / 2, bd = 9, FS = [1, 0.5, 2];
+        for (var q = 0; q < FS.length; q++) {
+          var w = c * FS[q];
+          if (w < BMIN * 0.97 || w > P.maxBpm) continue;
+          var d = Math.abs(Math.log(w / trend));
+          if (d < bd - 1e-9) { bd = d; f = FS[q]; }
+        }
+      }
+      dash = Math.max(BMIN, Math.min(P.maxBpm, c * f)); dashF = f; sessionShown = true;
+      dashHist.push([t, dash]);
+    }
+
     /* 顯示中、慢板格子聽到的速度跟畫面一樣（差 7% 內）：唱誦蓋過木魚、上面的節奏明確度不夠時，數字照樣留著 */
     function gridAgrees() {
-      return beatOn && gridBpm > 0 && bpmSmooth > 0 && Math.abs(Math.log(gridBpm / bpmSmooth) / Math.LN2) < 0.1;
+      var ref = dash > 0 ? dash : bpmSmooth;
+      return beatOn && gridBpm > 0 && ref > 0 && Math.abs(Math.log(gridBpm / ref) / Math.LN2) < 0.1;
+    }
+    /* 恢復顯示：停太久（dashReset 秒）當作新的一次地鐘，不接著之前的數字 */
+    function dashResume(t) {
+      if (t - stopT > P.dashReset) { dash = 0; dashF = 1; dashHist.length = 0; }
+      lastCand = 0;
     }
     function seedAt(t, bpm) {
+      if (!beatOn) dashResume(t);
+      dashHist.length = 0;   /* 格子給的速度是刻意的修正，不跟之前畫面上的數字比 */
       beatOn = true; everOn = true; resumeSince = -1; onSince = t; unclear = 0; gridSince = -1; gridHist.length = 0;
-      var j0 = Math.max(0, Math.min(M - 1, Math.round(Math.log(bpm / 45) / Math.LN2 / LSTEP)));
+      var j0 = Math.max(0, Math.min(M - 1, Math.round(Math.log(bpm / BMIN) / Math.LN2 / LSTEP)));
       V = new Float32Array(M);
       for (var j = 0; j < M; j++) V[j] = -2 * Math.abs(j - j0) * LSTEP;
       nUpd = Math.ceil(10 / P.tempoEvery) + 1; tempoIdx = j0; lastGoodTempoT = t;
@@ -517,14 +567,14 @@
         /* 按了「地鐘開始了」以後 forceHold 秒內：數字還沒出來、或畫面的速度跟格子不一樣又不是一直都清楚（按得早，追到開頭的雜音或倍數），
          * 格子聽到慢板速度就改從那個速度接著算。數字已經出來、木魚又清楚時按鈕不會出現，所以這段時間幾乎都是地鐘剛開始的慢板 */
         if (t < forceUntil && gridBpm && (bpmSmooth <= 0 || upSec < 10 || (!gridAgrees() && clarity() < P.resumeFrac))) { seedAt(t, gridBpm); return true; }
-        var ref = bpmSmooth > 0 ? bpmSmooth : lastOut, per = ref > 0 ? 60 / ref : 0.2;   /* 用畫面上的速度（雜音裡接的倍數不算） */
+        var ref = dash > 0 ? dash : bpmSmooth > 0 ? bpmSmooth : lastOut, per = ref > 0 ? 60 / ref : 0.2;   /* 用畫面上的速度（雜音裡接的倍數不算） */
         /* 慢板：格子聽得到、速度跟畫面一樣，也算有在敲（開頭慢板「對得上」常常不成立，免得被判成停了） */
         if (good || (gridBpm && ref > 0 && Math.abs(Math.log(gridBpm / ref) / Math.LN2) < 0.1)) lastBeatT = t;
         if (onSince < 0 && upSec > 10) onSince = t;     /* 開始顯示 */
         if (t >= forceUntil && onSince >= 0 && t - onSince >= P.stopAfter && lastBeatT > -1e8 && t - lastBeatT > Math.max(P.stopMin, P.stopBeats * per)) {
           beatOn = false; resumeSince = -1; onSince = -1;
-          stopBpm = bpmSmooth > 0 ? bpmSmooth : null; gridHist.length = 0; gridBpm = 0;
-          if (t - gridStartT < P.probation) { everOn = false; stopBpm = null; lastBeatT = -1e9; }   /* 靠格子剛開始顯示就停了：當作沒聽到過 */
+          stopBpm = dash > 0 ? dash : bpmSmooth > 0 ? bpmSmooth : null; gridHist.length = 0; gridBpm = 0; stopT = t; lastCand = 0;
+          if (t - gridStartT < P.probation) { everOn = false; stopBpm = null; lastBeatT = -1e9; dash = 0; sessionShown = false; dashHist.length = 0; }   /* 靠格子剛開始顯示就停了：當作沒聽到過 */
           gridStartT = -1e9;
           V = null; nUpd = 0; mult = 1; lastOut = 0; bpmSmooth = 0; jumpSince = -1; dispMult = 1; tN = tG = 0;   /* 重新開始時從頭抓 */
         }
@@ -539,7 +589,10 @@
         for (var q = 0; q < GH; q++) s += gHist[q];
         if (gN >= GH && s / GH >= P.resumeFrac) {
           if (resumeSince < 0) resumeSince = t;
-          if (t - resumeSince >= P.resumeSec) {           /* 開始／恢復：停了那段雜音裡接的倍數不算 */
+          /* 這一份還沒出過數字、速度又快（地鐘開頭不會這麼快）：要清楚得久一點 */
+          var need = !sessionShown && tempoIdx >= 0 && BPMS[tempoIdx] * mult > P.fastStart ? P.fastStartSec : P.resumeSec;
+          if (t - resumeSince >= need) {           /* 開始／恢復：停了那段雜音裡接的倍數不算 */
+            dashResume(t);
             beatOn = true; everOn = true; resumeSince = -1; onSince = t; mult = 1; lastOut = tempoIdx >= 0 ? BPMS[tempoIdx] : 0;
             unclear = 0;
             return;
@@ -660,7 +713,7 @@
     function state() {
       var t = now();
       if (t - cachedAt >= 0.2 || !cachedPitch) { cachedPitch = pitchStats(t); cachedAt = t; }
-      var live = beatOn && bpmSmooth > 0 && tempoIdx >= 0 && nUpd * P.tempoEvery >= 10 && (t - lastGoodTempoT < 4 || gridAgrees());   /* 剛開始 10 秒的估計還在跳，不顯示 */
+      var live = beatOn && bpmSmooth > 0 && dash > 0 && tempoIdx >= 0 && nUpd * P.tempoEvery >= 10 && (t - lastGoodTempoT < 4 || gridAgrees());   /* 剛開始 10 秒的估計還在跳，不顯示 */
       /* 開頭取樣：先收 4 秒聲音才算第一次；追蹤 trustSec 秒以後，最近 6 秒 85% 清楚、持續 3 秒才顯示，順利的話追蹤約 14.5 秒。給畫面倒數用 */
       var warm = null, upSec = nUpd * P.tempoEvery, WARM = beatOn ? 10 : 14.5;   /* 按了「地鐘開始了」：追蹤滿 10 秒就顯示 */
       if (!everOn || (beatOn && (upSec < 10 || bpmSmooth <= 0))) {
@@ -673,13 +726,13 @@
       }
       return {
         t: t,
-        bpm: live ? bpmSmooth : null,
+        bpm: live ? dash : null,
         stopped: everOn && !beatOn,       /* 判斷成停了（地鐘結束、只剩講話或雜音）；還沒聽到過清楚的木魚不算 */
         lastBpm: everOn && !beatOn ? stopBpm : null, /* 停之前最後的速度 */
         tempoConf: tempoConf,
         tempoPeak: tempoPeak,
         tempoLevel: tempoLevel,           /* 最近幾秒高頻音量的高點（dBFS） */
-        autoMult: dispMult,              /* 1 以外＝自動接回過倍數（畫面上那個數字用的） */
+        autoMult: Math.round(dispMult * dashF * 100) / 100,   /* 1 以外＝自動接回過倍數（畫面上那個數字用的；0.7 起含儀表板換算的 2/3、1.5） */
         lastOnsetAgo: lastOnsetT >= 0 ? t - lastOnsetT : null,
         onsets: onsetCount,
         note: cachedPitch.note,          /* 現在唱的音（半音刻度，可帶小數） */
@@ -710,7 +763,7 @@
       if (beatOn) return;
       var t = tNow();
       if (gridBpm) seedAt(t, gridBpm);
-      else { beatOn = true; everOn = true; resumeSince = -1; onSince = -1; unclear = 0; gridSince = -1; gridHist.length = 0; }
+      else { dashResume(t); beatOn = true; everOn = true; resumeSince = -1; onSince = -1; unclear = 0; gridSince = -1; gridHist.length = 0; }
       forceUntil = t + P.forceHold; gridStartT = -1e9;
     };
     api.sampleRate = SR;
