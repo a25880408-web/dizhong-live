@@ -59,15 +59,22 @@ body {
   padding-left: max(16px, env(safe-area-inset-left, 0px));
   padding-right: max(16px, env(safe-area-inset-right, 0px));
 }
-header.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+header.top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
 h1 { font-size: 1.15rem; margin: 0; letter-spacing: .04em; }
 h2 { font-size: 1rem; margin: 0 0 6px; }
+/* 狀態標籤（0.4.2 放大）：聆聽中＝實心綠＋閃動圓點；已停止／暫停＝方塊 */
 .pill {
-  font-size: .8rem; padding: 3px 10px; border-radius: 999px; white-space: nowrap;
-  background: var(--bronze-soft); color: var(--bronze); border: 1px solid transparent;
+  display: inline-flex; align-items: center; gap: .4em;
+  font-size: 1.3rem; font-weight: 700; line-height: 1.2; padding: 7px 16px; border-radius: 999px; white-space: nowrap;
+  background: var(--bronze-soft); color: var(--bronze); border: 2px solid transparent;
 }
-.pill.live { background: transparent; border-color: var(--good); color: var(--good); }
+.pill.live { background: var(--good); border-color: var(--good); color: var(--surface); }
+.pill.live::before { content: ""; width: .55em; height: .55em; border-radius: 50%; background: currentColor; animation: pillPulse 1.2s ease-in-out infinite; }
+.pill.off { border-color: var(--bronze); }
+.pill.off::before { content: ""; width: .5em; height: .5em; border-radius: 2px; background: currentColor; }
 .pill.err { background: transparent; border-color: var(--bad); color: var(--bad); }
+@keyframes pillPulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .pill.live::before { animation: none; } }
 /* 範例／紀錄提示條 */
 .banner {
   display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px;
@@ -240,7 +247,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     </ul>
   </section>
   <footer>
-    <div>版本 <b id="ver">0.4.1</b> · 算法沿用「地鐘節拍器 3.3」</div>
+    <div>版本 <b id="ver">0.4.2</b> · 算法沿用「地鐘節拍器 3.3」</div>
     <button id="update" type="button" class="updbtn">更新到最新版</button>
     <div id="updMsg"></div>
   </footer>
@@ -348,7 +355,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     if (micSrc) { try { micSrc.disconnect(); } catch (e) {} micSrc = null; }
     if (micStream) { micStream.getTracks().forEach(function (t) { t.stop(); }); micStream = null; }
     if (wake) { try { wake.release(); } catch (e) {} wake = null; }
-    if (mode === "mic") { mode = "stopped"; setStatus("已停止"); saveCur(); }
+    if (mode === "mic") { mode = "stopped"; setStatus("已停止", "off"); saveCur(); }
     $("start").textContent = "開始聆聽"; $("start").classList.remove("stop");
     renderRecs();
   }
@@ -358,7 +365,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
 
   function stopFile() {
     if (!player.paused) player.pause();
-    if (mode === "file") { mode = "stopped"; setStatus("已停止"); }
+    if (mode === "file") { mode = "stopped"; setStatus("已停止", "off"); }
   }
   $("file").addEventListener("change", function () {
     var f = this.files && this.files[0];
@@ -388,8 +395,8 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     if (ctx && ctx.state === "suspended") ctx.resume();
     if (player.src && cur && cur.kind === "file") { mode = "file"; viewRec = null; setStatus("播放測試", "live"); render(true); renderRecs(); }
   });
-  player.addEventListener("pause", function () { if (mode === "file") { setStatus("暫停"); saveCur(); renderRecs(); } });
-  player.addEventListener("ended", function () { if (mode === "file") { mode = "stopped"; setStatus("播完了"); saveCur(); renderRecs(); } });
+  player.addEventListener("pause", function () { if (mode === "file") { setStatus("暫停", "off"); saveCur(); renderRecs(); } });
+  player.addEventListener("ended", function () { if (mode === "file") { mode = "stopped"; setStatus("播完了", "off"); saveCur(); renderRecs(); } });
 
   $("reset").addEventListener("click", function () {
     stopMic(); stopFile();
