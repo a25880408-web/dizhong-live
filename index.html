@@ -91,6 +91,10 @@ h2 { font-size: 1rem; margin: 0 0 6px; }
 .trend.flat, .big.flat { color: var(--good); }
 .trend.down, .big.down { color: var(--slow); }
 .trend.wait { font-size: 1.15rem; font-weight: 600; }
+.trend.stop { font-size: 1.3rem; color: var(--muted); }   /* 沒聽到木魚：數字停在最後的速度、灰色 */
+/* 開頭取樣的倒數進度條 */
+.warmbar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin: 6px 0 10px; }
+.warmbar i { display: block; height: 100%; width: 0; background: var(--wood); border-radius: 3px; transition: width .25s linear; }
 .diff { font-size: 1.25rem; line-height: 1.3; }
 .big.dim { color: var(--muted); }
 .beat { width: 22px; height: 22px; border-radius: 50%; background: var(--line); flex: none; transition: background .25s ease-out, transform .25s ease-out; }
@@ -169,6 +173,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
       </div>
       <span id="beat" class="beat" aria-hidden="true" style="margin-left:auto"></span>
     </div>
+    <div id="warmBar" class="warmbar" hidden aria-hidden="true"><i id="warmFill"></i></div>
     <div class="row small">
       算成一半或兩倍時：
       <button id="x2" type="button">×2</button>
@@ -227,14 +232,15 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     <ul>
       <li>手機放在聽得到木魚的地方，<b>螢幕保持亮著</b>（關螢幕或切到別的 App 就會停）。</li>
       <li>聲音只在手機上計算，不錄音、不上傳；紀錄只存數字（速度、調），也只存在這支手機。</li>
-      <li>剛開始要聽十幾秒才抓得到速度；調要連續唱約 20 秒才會出來。</li>
+      <li>剛開始會顯示「<b>聲音取樣中</b>」和倒數：速度約 14 秒（木魚聲不清楚時倒數會停住、顯示「等木魚聲」）；調通常唱幾秒就出來，取樣中會顯示百分比。</li>
       <li>速度看的是最近十幾下（慢的時候 6 秒、快的時候約 3 秒），加速時畫面大約比實際晚 2 秒。</li>
+      <li>木魚停了（地鐘結束、只剩講話或雜音）約 4 秒，會顯示「<b>沒聽到木魚</b>」，數字變灰、停在最後的速度，不會亂跳；木魚再敲起來會自動接著算。</li>
       <li><b>沒網路也能用</b>：打開過一次，之後沒網路也打得開。建議用 Safari 的分享鍵「加入主畫面」，從主畫面的圖示打開。</li>
       <li>從主畫面打開和從 Safari 打開，紀錄是分開存的；固定用同一種方式打開。重要的紀錄請按「匯出」存到「檔案」或傳到 LINE。</li>
     </ul>
   </section>
   <footer>
-    <div>版本 <b id="ver">0.3.1</b> · 算法沿用「地鐘節拍器 3.3」</div>
+    <div>版本 <b id="ver">0.4.1</b> · 算法沿用「地鐘節拍器 3.3」</div>
     <button id="update" type="button" class="updbtn">更新到最新版</button>
     <div id="updMsg"></div>
   </footer>
@@ -327,6 +333,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     }
     /* 停一下再按開始：接著同一份；剛看完範例、紀錄或錄音測試：開新的一份 */
     if (!eng || !cur || cur.kind !== "mic" || mode === "sample" || mode === "record") { newSession("mic"); clearDisplay(); }
+    else if (eng.rearm) eng.rearm();   /* 接著同一份：重新開始抓速度，不用等「停了以後」那麼嚴格的判斷 */
     viewRec = null;
     micSrc = ctx.createMediaStreamSource(micStream);
     micSrc.connect(proc);
@@ -525,7 +532,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     $("trend").textContent = "—"; $("trend").className = "trend wait"; $("bpm").className = "big dim"; shownBpm = null;
     $("tempoNote").textContent = ""; $("keyDiff").textContent = "—"; $("keyDiff").className = "diff";
     $("keyDetail").textContent = ""; $("note").textContent = "—"; $("multInfo").textContent = "";
-    $("needle").style.left = "50%";
+    $("needle").style.left = "50%"; $("warmBar").hidden = true;
   }
   function viewUI() {
     var notLive = mode === "sample" || mode === "record";
@@ -552,7 +559,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
 
   function render(force) {
     viewUI();
-    var bpm = null, key = null, note = null, conf = null, autoMult = 1, keyN = 0, live = isLive();
+    var bpm = null, key = null, note = null, conf = null, autoMult = 1, keyN = 0, live = isLive(), stopped = false, lastBpm = null, warm = null, keyFrac = 0;
     var S = currentSeries();
     if (mode === "sample") {
       bpm = lastOf(S.bpm); key = lastOf(S.key);
@@ -563,14 +570,17 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     } else if (eng) {
       var st = eng.state();
       bpm = st.bpm; key = st.key; note = st.note; conf = st.tempoConf; autoMult = st.autoMult; keyN = st.keyN;
+      stopped = !!st.stopped; lastBpm = st.lastBpm; warm = st.warm; keyFrac = st.keyFrac || 0;
     }
     /* 速度：以 5 為一格（210、215、220…）。差不到一格多一點不換，免得在兩格中間來回跳 */
     var b = bpm != null ? bpm * S.mult : null;
-    if (b == null) shownBpm = null;
+    var held = b == null && stopped && lastBpm != null ? lastBpm * S.mult : null;   /* 停了：停在最後的速度 */
+    if (b == null) shownBpm = held != null ? Math.round(held / 5) * 5 : null;
     else if (shownBpm == null || Math.abs(b - shownBpm) > 3.5) shownBpm = Math.round(b / 5) * 5;
     $("bpm").textContent = shownBpm != null ? shownBpm : "—";
     var trend = $("trend"), tcls = null;
-    if (b != null && S.t.length > 12) {
+    if (b == null && stopped && live && eng) { trend.textContent = "沒聽到木魚"; trend.className = "trend stop"; }
+    else if (b != null && S.t.length > 12) {
       var i = S.t.length - 1, ago = null, lim = S.t[i] - (live ? 10 : 30);
       for (var j = i; j >= 0; j--) if (S.t[j] <= lim) { ago = S.bpm[j]; break; }
       if (ago) {
@@ -580,12 +590,22 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
         else { trend.textContent = "→ 持平"; tcls = "flat"; }
         trend.className = "trend " + tcls;
       } else if (/up|down|flat/.test(trend.className)) tcls = trend.className.replace("trend ", "");
+      else { trend.textContent = "判斷快慢中…"; trend.className = "trend wait"; }   /* 要有 10 秒前的速度才比得出來 */
+    } else if (b != null && live && eng) { trend.textContent = "判斷快慢中…"; trend.className = "trend wait"; }
+    else if (live && eng && warm) {   /* 開頭取樣：倒數 */
+      var sec = Math.ceil(warm.left);
+      trend.textContent = warm.stalled ? "等木魚聲…" : "聲音取樣中 · " + (sec > 0 ? sec + " 秒" : "快好了");
+      trend.className = "trend wait";
     } else if (live && eng) { trend.textContent = "聽速度中…"; trend.className = "trend wait"; }
+    var showWarm = !!(live && eng && warm && b == null && !stopped);
+    $("warmBar").hidden = !showWarm;
+    if (showWarm) $("warmFill").style.width = Math.round(warm.frac * 100) + "%";
     $("bpm").className = "big" + (b == null ? " dim" : tcls ? " " + tcls : "");
-    if (live && eng) $("tempoNote").textContent = b == null ? "還沒聽到穩定的敲擊" : (conf != null && conf < 0.15 ? "節奏不太清楚" : "");
+    if (live && eng) $("tempoNote").textContent = b == null ? (stopped ? (held != null ? "停在最後的速度；木魚再敲起來會接著算" : "木魚再敲起來會接著算")
+        : showWarm ? (warm.stalled ? "聽到木魚聲才會繼續倒數" : "收集木魚聲，算出穩定的速度") : "還沒聽到穩定的敲擊") : (conf != null && conf < 0.15 ? "節奏不太清楚" : "");
     else if (!live) $("tempoNote").textContent = mode === "sample" ? "範例最後的速度" : "紀錄最後的速度";
-    var m = autoMult * S.mult;
-    $("multInfo").textContent = live && m !== 1 ? "（已" + (autoMult !== 1 ? "自動" : "") + "修正 ×" + (m >= 1 ? m : "1/" + (1 / m)) + "）" : "";
+    var m = (stopped ? 1 : autoMult) * S.mult;   /* 停了：雜音裡接的倍數不算 */
+    $("multInfo").textContent = live && m !== 1 ? "（已" + (!stopped && autoMult !== 1 ? "自動" : "") + "修正 ×" + (m >= 1 ? m : "1/" + (1 / m)) + "）" : "";
 
     /* 調 */
     $("key").textContent = key != null ? pcName(key) : "—";
@@ -603,7 +623,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
       $("needle").style.visibility = "visible";
     } else {
       $("needle").style.left = "50%"; $("needle").style.visibility = "hidden";
-      kd.textContent = live && eng ? (keyN > 0 ? "聽調中…" : "還沒聽到唱誦") : "—"; kd.className = "diff";
+      kd.textContent = live && eng ? (keyN > 0 ? "聲音取樣中 · " + Math.max(1, Math.round(keyFrac * 100)) + "%" : "還沒聽到唱誦") : "—"; kd.className = "diff";
       if (live) $("keyDetail").textContent = "";
     }
     $("note").textContent = note != null ? (function (n) { var x = DZ.noteOf(n); return x.name + (x.cents >= 0 ? " +" : " ") + x.cents; })(note) : "—";
@@ -674,7 +694,7 @@ footer { font-size: .78rem; color: var(--muted); text-align: center; display: gr
     if (eng && busy()) {
       var st = eng.state();
       if (eng !== beatEng) { beatEng = eng; beatN = st.onsets; }
-      else if (st.onsets !== beatN) { beatN = st.onsets; beatUntil = nowMs + 100; }
+      else if (st.onsets !== beatN) { beatN = st.onsets; if (!st.stopped) beatUntil = nowMs + 100; }   /* 停了：講話聲不閃 */
     } else beatUntil = 0;
     $("beat").classList.toggle("on", nowMs < beatUntil);
     requestAnimationFrame(tick);
