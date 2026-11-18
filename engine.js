@@ -2,7 +2,7 @@
  * 只做計算、不碰畫面：手機網頁（index.html）和電腦上的比對測試（test/compare.js）共用這一份。
  * 演算法沿用「地鐘節拍器 3.3」的離線分析，改成邊聽邊算：
  *   速度：法器聲頻帶（400–5000 Hz）的頻譜差分 → 最近幾秒做自相關＋梳狀加權 → 只往前看的 Viterbi（速度要連續）
- *   音高：YIN 量基頻 → 男女眾折回同一個八度 → 最近 20 秒裡「最低的常唱音」＝四字佛號的「阿」＝現在的調
+ *   音高：YIN 量基頻 → 最近 20 秒唱得穩的點 → 音名圈上找「阿」（下面空、上面有彌和陀佛，0.5 起同「地鐘節拍器 3.5」）＝現在的調
  * 用法：var eng = DZ.createEngine({sampleRate: 48000}); eng.push(Float32Array 單聲道); eng.state();
  */
 (function (root) {
@@ -127,21 +127,47 @@
     for (i = 0; i < n; i++) if (h[i] > best) { best = h[i]; bi = i; }
     return { mid: from + bi * B, h: h, B: B, max: best };
   }
-  /* 一段唱誦裡最低的那個常唱音 —— 四字佛號的「阿」（同 3.3 lowBand，輸入輸出都是半音刻度） */
-  function lowBand(ms) {
-    if (ms.length < 20) return null;
-    var srt = ms.slice().sort(num);
-    var lo = Math.floor(srt[0]) - 1, hi = Math.ceil(srt[srt.length - 1]) + 1;
-    var H = histPeak(ms, lo, hi), i, best = -1, need = ms.length * 0.12;
-    for (i = 1; i < H.h.length - 1; i++) {
-      if (!(H.h[i] >= H.h[i - 1] && H.h[i] > H.h[i + 1] && H.h[i] > 0.35 * H.max)) continue;
-      var cm0 = lo + i * H.B, mass = 0, k;
-      for (k = 0; k < ms.length; k++) if (Math.abs(ms[k] - cm0) < 0.6) mass++;
-      if (mass >= need) { best = i; break; }
+  /* 圈上的差（−6～6 半音） */
+  function circ(d) { while (d > 6) d -= 12; while (d <= -6) d += 12; return d; }
+  /* 一群音（半音刻度）裡「阿」的音名（0～12，可帶小數），回傳 { pc, bands }（bands＝其他常唱音，給接續前一次用）。
+   * 0.5 起改用「地鐘節拍器 3.5」的做法（dzAhClass），取代「折回中心上下 9 個半音、取最低的常唱音」（lowBand）：
+   *   - 上下 9 個半音同一個音會留在兩個八度，男眾唱的「陀佛」#C3 被當成最低音「阿」；
+   *   - 錄音裡常有比「阿」高五度的音（0902 的 E、0922 的 D），折回後會跑到「阿」下面。
+   * 做法：音名排成一圈（男女眾差八度自然重疊），每個常唱音打分數＝自己的點數＋上面 5 個半音內（彌、陀佛）－2×下面 4.5 個半音內；
+   * 「阿」至少要有最常唱那個音的四成（底下零星的滑音不算）；相距不到 1 個半音的高點併成一個。
+   * 只聽得到一個音、上面沒有旋律（例如節拍器的合成聲）就回傳 null。 */
+  function ahClass(ms) {
+    var n = ms.length, NB = 120, cnt = new Float64Array(NB), sm = new Float64Array(NB), k, j;
+    var pcs = ms.map(function (m) { return ((m % 12) + 12) % 12; });
+    pcs.forEach(function (p) { cnt[Math.round(p * 10) % NB] += 1; });
+    for (k = 0; k < NB; k++) for (j = -5; j <= 5; j++) sm[k] += cnt[(k + j + NB) % NB];
+    var mass = function (c, lo, hi) {
+      var s = 0;
+      pcs.forEach(function (p) { var d = circ(p - c); if (d > lo && d <= hi) s++; });
+      return s;
+    };
+    var cand = [], peaks = [];
+    for (k = 0; k < NB; k++) {
+      if (sm[k] >= n * 0.06 && sm[k] >= sm[(k + NB - 1) % NB] && sm[k] > sm[(k + 1) % NB]) cand.push({ c: k / 10, s: sm[k] });
     }
-    if (best < 0) return medianOf(ms);
-    var cm = lo + best * H.B;
-    return medianOf(ms.filter(function (v) { return Math.abs(v - cm) < 0.5; }));
+    cand.sort(function (a, b) { return b.s - a.s; });
+    cand.forEach(function (p) {
+      if (!peaks.some(function (q) { return Math.abs(circ(q.c - p.c)) < 1; })) peaks.push(p);
+    });
+    if (peaks.length < 2) return null;
+    var best = null, bs = -1e9;
+    peaks.forEach(function (p) {
+      if (p.s < peaks[0].s * 0.4) return;
+      var sc = mass(p.c, -0.5, 0.5) + mass(p.c, 0.6, 5) - 2 * mass(p.c, -4.5, -0.6);
+      if (sc > bs) { bs = sc; best = p.c; }
+    });
+    if (best == null || mass(best, 0.6, 5) < n * 0.1) return null;
+    var fine = function (c) {
+      var off = [];
+      pcs.forEach(function (p) { var d = circ(p - c); if (Math.abs(d) < 0.5) off.push(d); });
+      return (((c + medianOf(off)) % 12) + 12) % 12;
+    };
+    return { pc: fine(best), bands: peaks.map(function (p) { return fine(p.c); }) };
   }
 
   /* 二階高通（去掉冷氣、腳步的低頻） */
@@ -425,10 +451,10 @@
       for (k = 0; k < pts.length; k++) if (t - pts[k].t <= 30) recent.push(pts[k]);
       if (recent.length < 12) return { note: null, key: null, keyN: 0, center: null };
       var c = histPeak(recent.map(function (p) { return p.m; }), 36, 84).mid;
-      var fold = recent.map(function (p) {
+      var fold = recent.map(function (p) {           /* 0.5 起折回剛好一個八度（中心上下各 6 個半音），原本上下 9 個 */
         var v = p.m;
-        while (v < c - 9) v += 12;
-        while (v > c + 9) v -= 12;
+        while (v < c - 6) v += 12;
+        while (v >= c + 6) v -= 12;
         return { t: p.t, m: v };
       });
       /* 只留「唱得穩」的點：前後 3 點的中位數相差 45 音分以內 */
@@ -443,9 +469,27 @@
       for (k = fold.length - 1; k >= 0 && t - fold[k].t <= 0.4; k--) lastN.push(fold[k].m);
       if (lastN.length >= 2) note = medianOf(lastN);
       var keyPts = stable.filter(function (p) { return t - p.t <= P.keyWin; }).map(function (p) { return p.m; });
-      var key = keyPts.length >= 30 ? lowBand(keyPts) : null;
+      var key = null, ah = keyPts.length >= 30 ? ahClass(keyPts) : null;
+      if (ah) {
+        var pc = ah.pc;
+        /* 「阿」偶爾唱得少，最低的常唱音會一下跳成上面的「彌」：往上跳時，上一次（15 秒內）的「阿」這次還聽得到就接著用。
+         * 往下跳（出現更低的常唱音）照樣採用，免得開頭量錯就一路錯下去 */
+        if (lastKey != null && t - lastKeyT <= 15 && circ(pc - lastKey) > 0.8) {
+          var alt = null;
+          ah.bands.forEach(function (b) {
+            var d = Math.abs(circ(b - lastKey));
+            if (d <= 0.6 && (alt == null || d < Math.abs(circ(alt - lastKey)))) alt = b;
+          });
+          if (alt != null) pc = alt;
+        }
+        /* 音名 → 音高：離上一次最近的八度；第一次放在標準「阿」A3（57）附近 */
+        var ref = lastKey != null ? lastKey : 57;
+        key = pc + 12 * Math.round((ref - pc) / 12);
+        lastKey = key; lastKeyT = t;
+      }
       return { note: note, key: key, keyN: keyPts.length, center: c };
     }
+    var lastKey = null, lastKeyT = -1e9;
 
     function push(x) {
       for (var n = 0; n < x.length; n++) {
